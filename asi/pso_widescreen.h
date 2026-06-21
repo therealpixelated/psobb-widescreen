@@ -37,6 +37,8 @@ typedef enum {
     K_ADD,       /* *(float*)va   +=  coeff*base + offset   (RMW; applied ONCE)          */
     K_MUL,       /* *(float*)va   *=  coeff*base + offset   (RMW; applied ONCE)          */
     K_U32,       /* *(uint32_t*)va = (uint32_t)(coeff*base+offset) (res/atlas tables)    */
+    K_U16,       /* *(uint16_t*)va = (uint16_t)round(stock16*(coeff*base+offset))  RMW;
+                    16-bit tile W/H shorts (dressing-room hex tiles; applied ONCE)       */
     K_AR,        /* *(float*)va    =  display aspect        (the 12 aspect writes)       */
     K_NOP,       /* write 0x90 x5  (instruction-kill cleanup)                            */
 } bake_kind_t;

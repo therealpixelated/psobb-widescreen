@@ -4208,6 +4208,34 @@ static const bake_t kBakes[] = {
   { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_TRINITY, GATE_ALWAYS, 0x44084000, "fe.login.botright.x MOD_X_R +right (stock 545)", B_LIT },
   { 0x009F24E4, K_SET, B_A, 0.5f, 168.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F40000, "ig.team_invitation_explanation_submenu.x (MOD_X_C)", B_LIT },
   { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_bg_texture.x (MOD_X_C; offset 0)", B_LIT },
+  /* ---- SRC_TRINITY : dressing-room hex tiles (static x hud_scale, Trinity ResolutionPatch) ---- */
+  /* All 24 are Trinity mode-1/hudScaleY rows; in our affine model that == x hud_scale
+     (design_h/480) because the tiles ride affine_y=render_h/design_h. No-op at hud_scale 1.0,
+     x2.0 at HudScale 2.0. RMW caches the stock on first apply (stock 0x00000000 = uncached). */
+  { 0x0091DBD0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBD8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBDC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBE8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBEC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBF0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBF8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DBFC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DC00, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DC04, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DC08, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x0091DC0C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
+  { 0x009B77D0, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B77D2, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B77E4, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B77E6, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B77F8, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B77FA, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B780C, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B780E, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B7820, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B7822, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B7834, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  { 0x009B7836, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
   /* ---- SRC_OURS : 27 rows ---- */
   { 0x004EC0AF, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x44230000, "dr.honeycomb.enter_exit.right_edge  WRITTEN VALUE = st", B_LIT },
   { 0x004EC951, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x442A0000, "dr.honeycomb.transition.right_edge  WRITTEN VALUE = st", B_LIT },
@@ -4310,6 +4338,28 @@ static void apply_bakes(const ws_scale_ctx *s)
             float expr = (b->coeff * resolve_base(b->base, s) + b->offset)
                        * resolve_base(b->base2, s);   /* base2 == B_LIT (1.0) for most rows */
             uint32_t want;
+
+            /* K_U16 — 16-bit RMW tile W/H short. Fully self-contained: the shared
+               path below reads/writes a uint32 (would clobber the adjacent 16-bit
+               field), so this branch does its own read/guard/write and continues. */
+            if (b->kind == K_U16) {
+                if (!g_stock_valid[i]) {
+                    /* first sight: snapshot the stock short as a float */
+                    g_stock_cache[i] = (float)*(volatile uint16_t *)(uintptr_t)b->va;
+                    g_stock_valid[i] = 1;
+                }
+                uint16_t want16 = (uint16_t)(g_stock_cache[i] * expr + 0.5f); /* round-to-nearest, matches Trinity round() */
+                uint16_t live16 = *(volatile uint16_t *)(uintptr_t)b->va;
+                if (live16 == want16) { n_skip++; continue; }                 /* idempotent */
+                DWORD old16, tmp16;
+                if (!VirtualProtect((LPVOID)(uintptr_t)b->va, 2, PAGE_EXECUTE_READWRITE, &old16)) continue;
+                *(volatile uint16_t *)(uintptr_t)b->va = want16;
+                VirtualProtect((LPVOID)(uintptr_t)b->va, 2, old16, &tmp16);
+                if (b->va < 0x008F8000u)  /* these tile VAs are >0x008F8000 => no icache flush */
+                    FlushInstructionCache(GetCurrentProcess(), (LPCVOID)(uintptr_t)b->va, 2);
+                n_delta++;
+                continue;
+            }
 
             if (b->kind == K_NOP) {
                 want = 0;  /* sentinel; handled below */
