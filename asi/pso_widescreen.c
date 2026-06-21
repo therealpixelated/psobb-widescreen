@@ -4058,26 +4058,38 @@ static int patch_dressingroom_layout(const ws_scale_ctx *s)
     // s->A is the HudScale-scaled design width (853.33*hud_scale); divide hud_scale back
     // out to recover the native 853.33. (The old (s->A-640) over-shot 5x at hs2.0.)
     const float dw_native = (g_cfg.hud_scale > 0.01f) ? (s->A / g_cfg.hud_scale) : s->A;
-    const float right = dw_native - 640.0f;   // = 213.333 native, Ephinea-exact
-    // Only the 3 VAs Ephinea actually patches (eph_only in the delta). It does NOT touch
-    // the honeycomb .text frames (0x004EC0AF/0x004EC951) or the Input-Name field
-    // (0x0091DC80) -- so neither do we.
+    const float right = dw_native - 640.0f;        // 213.33 native -> Ephinea element positions
+    const float frame_right = s->A - 640.0f;       // wider -> our honeycomb backdrop-frame fill
+    // POSITION VAs: the 3 Ephinea patches (eph_only in the delta), shifted by the native
+    // 213.33 so OK/Back/Name land exactly where Ephinea puts them. Ephinea does NOT touch
+    // the Input-Name field (0x0091DC80), so neither do we.
     static const struct { uint32_t va; uint32_t stock_bits; } R[] = {
         { 0x0091D988u, 0x44178000u },   // 606.0 DR Top OK/Back row X    -> 819.33 (Ephinea)
         { 0x0091DC74u, 0x44170000u },   // 604.0 DR Character-Name field -> 817.33 (Ephinea)
         { 0x0091DD1Cu, 0x44198000u },   // 614.0 DR Bottom OK/Back row X -> 827.33 (Ephinea)
     };
+    // FRAME VAs: the honeycomb backdrop-frame right edges. Ephinea does NOT patch these
+    // (it fills the hex backdrop via the per-draw aspect detour), but OUR backdrop fill
+    // relies on widening this frame -- removing them collapses the backdrop to a 4:3
+    // corner. Kept at the wider stride until the per-draw backdrop port is in.
+    static const struct { uint32_t va; uint32_t stock_bits; } F[] = {
+        { 0x004EC0AFu, 0x44230000u },   // 652.0 DR Enter/Exit honeycomb Right edge (.text)
+        { 0x004EC951u, 0x442A0000u },   // 680.0 DR Transition honeycomb Right edge (.text)
+    };
     int n = 0;
     for (int i = 0; i < (int)(sizeof(R)/sizeof(R[0])); i++) {
-        float stock;
-        memcpy(&stock, &R[i].stock_bits, 4);
+        float stock; memcpy(&stock, &R[i].stock_bits, 4);
         float want = stock + right;
-        uint32_t got = *(volatile uint32_t *)(uintptr_t)R[i].va;
-        if (got == R[i].stock_bits) {
-            if (patch_write(R[i].va, &want, 4, "dressroom MOD_X_R")) n++;
-        }
+        if (*(volatile uint32_t *)(uintptr_t)R[i].va == R[i].stock_bits)
+            if (patch_write(R[i].va, &want, 4, "dressroom pos MOD_X_R")) n++;
     }
-    log_line("[pso_widescreen] dressroom: MOD_X_R += %.3f native (Ephinea-exact) (%d/3)", right, n);
+    for (int i = 0; i < (int)(sizeof(F)/sizeof(F[0])); i++) {
+        float stock; memcpy(&stock, &F[i].stock_bits, 4);
+        float want = stock + frame_right;
+        if (*(volatile uint32_t *)(uintptr_t)F[i].va == F[i].stock_bits)
+            if (patch_write(F[i].va, &want, 4, "dressroom frame")) n++;
+    }
+    log_line("[pso_widescreen] dressroom: pos+=%.1f frame+=%.1f (%d/5)", right, frame_right, n);
     return 1;
 }
 
