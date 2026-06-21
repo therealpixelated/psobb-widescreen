@@ -1325,17 +1325,14 @@ static void cc_text_force_f32(uint32_t va, float v)
 // flip needed; cc_text_force_f32's VirtualProtect is a harmless no-op there).
 #define CC_TEXT_DESC_X2_VA 0x0091E3F4u
 
-// Shared char-create right-pane horizontal-shift tuning knob. The class-description
-// TEXT (this lever) and the whole class info BOX (cc_box_x_install splice, below) are
-// BOTH shifted right by the SAME rigid amount = CC_RIGHTPANE_X_FACTOR*(design_w-640)
-// so the moved box and the text inside it stay aligned. The parent tunes this ONE
-// #define until the box is balanced; the text and box move together by construction.
-// (Text rides RenderText3D 0x0082b54f, the box rides RenderChallengePanelElement
-// 0x004e9d8c — different draw paths, so each needs its own bake, but the same factor.)
-#define CC_RIGHTPANE_X_FACTOR 0.40f   // shared: right-pane rigid shift = factor*(design_w-640)
-                                      // reduced 0.60->0.40 — the info box strode
+// Char-create class-description TEXT right-pane horizontal-shift knob. Shifts the
+// description text right by CC_RIGHTPANE_X_FACTOR*(design_w-640) so it stays centered
+// in the (statically widened) right pane. (The old companion info-box splice that
+// shared this factor is removed — Ephinea applies no box-shift; the text bake stays.)
+// Text rides RenderText3D 0x0082b54f -> RenderUIQuad 0x0082B440 (applies the affine).
+#define CC_RIGHTPANE_X_FACTOR 0.40f   // right-pane text shift = factor*(design_w-640)
+                                      // reduced 0.60->0.40 — the prior value strode
                                       // too far right (big empty gap from the class list).
-                                      // Box + description text move in lockstep (both use this).
 
 // Scale-INVARIANT right-pane stride , owner: "same gap at 1.0 as 2.0").
 // design_w (0x0098A4B8) = 853.333 * HudScale, so the raw span (design_w-640) GROWS with
@@ -1344,8 +1341,7 @@ static void cc_text_force_f32(uint32_t va, float v)
 // width (design_w / HudScale = 853.33 @16:9, CONSTANT at every HudScale) so the shift is
 // the SAME number of DESIGN px at 1.0/1.5/2.0. The affine then scales the whole layout
 // uniformly => the class-list<->info-pane gap is proportionally identical at every scale.
-// Only the class-info box (cc_box_x_stub path 2, design-X>=300) and the description text
-// use this; the backdrop tiles ride g_cc_kx/ky (path 1) and are untouched.
+// Only the class-description text uses this stride now (the box-shift splice is gone).
 static float cc_rightpane_offset(float dw)
 {
     float s = g_cfg.hud_scale;
@@ -1370,9 +1366,8 @@ static void cc_text_early_bake(void)
     __try {
         float dw = hs_peek_f32(0x0098A4B8u);   // design_w: 853.33 @16:9 hs1.0, 640 @4:3, 1280 @hs1.5
         if (dw > 640.0f) {
-            // Stride keyed to design_w (CC_RIGHTPANE_X_FACTOR*span) — the EXACT SAME
-            // factor the info-box splice (cc_box_x_install) uses, so the description
-            // text rides aligned inside the moved box at every HudScale. Bake BOTH
+            // Stride keyed to design_w (CC_RIGHTPANE_X_FACTOR*span) so the description
+            // text stays centered in the statically widened right pane. Bake BOTH
             // description-text X levers in lockstep so the title line (0x004F4FA5 .text)
             // and the inner rows (0x0091E3F4 .data) move together — fixing the prior
             // single-lever misalignment. Both feed RenderText3D -> RenderUIQuad
@@ -2209,333 +2204,12 @@ static void cc_backdrop_install(void)
              (unsigned)CC_BACKDROP_SPLICE_VA, (void *)&cc_backdrop_stub, g_cc_backdrop_tramp);
 }
 
-// ============================================================
-// CHAR-CREATE CLASS-SELECT INFO BOX — RIGID RIGHT-SHIFT SPLICE 
-// ============================================================
-// GOAL: slide the WHOLE right-hand class-info box (cyan 9-slice frame + 4 class
-// previews + "Hunter" banner + "Enter OK" prompt + class-name labels + the
-// description sub-box) right by CC_RIGHTPANE_X_FACTOR*(design_w-640), WITHOUT moving
-// the LEFT class list.
-//
-// CHOKEPOINT (proven against the decompiled source + live draw_capture):
-// RenderChallengePanelElement_004e9d8c is the universal element draw fn —
-// void __cdecl RenderChallengePanelElement_004e9d8c(int, float, float *param_3,
-// undefined4 *, float *)
-// where param_3 (==ebx) points at the element's {X, W, ...} record. Every box element
-// AND every left-list row flows through here (chain emitter 0x0082bcae <- composer
-// 0x0082bb20 <- this fn's epilogue 0x004e9e3c). The element X is read at:
-// 0x004e9dcb: 8B 0B        mov ecx,[ebx]        ; ecx = element X (design float)
-// 0x004e9dcd: 89 4C 24 08  mov [esp+8],ecx      ; store X into the outgoing arg slot
-// and W is consumed next at 0x004e9dd1: D9 43 04  fld dword [ebx+4].
-//
-// DISCRIMINATOR (one gate, both sides tested by the parent's two screenshots):
-// - screen-id [0x00A165F0] == 12  => char-create (covers BOTH class-select AND the
-// dressing-room/appearance sub-screen — both are screen-id 12; the parent verifies
-// neither breaks). Off char-create => stock path, byte-identical behaviour.
-// - design X >= 300.0f  => RIGHT box only. The left class list draws at design-X<=292
-// (screen<=657); every right-box element is at design-X>=307 (screen>=690). Clean
-// gap 292..307 -> threshold 300 splits them with margin. design-X<300 => NO offset
-// (left list stays put). FALSE-POSITIVE guard: a left-list X that crept >=300 would
-// wrongly shift — but the live capture shows the list capped at 292, and the box
-// floor at 307, a 15px cushion either side of 300.
-// - design_w > 640 (install-time) => 4:3 is a hard no-op (splice not installed).
-//
-// SSE, not x87: at 0x004e9dbd the engine does `fld [0xA7221C]` leaving a LIVE scale
-// in st0 that the resumed code (`fld [ebx+4]; fmul st1`) depends on. Touching the x87
-// stack would corrupt it, so the stub does its float compare/add in xmm0 (SSE leaves
-// the FPU stack untouched). EFLAGS is provably dead at the resume point (only
-// fld/fmul/fstp/mov/call follow until well past — no conditional branch reads our
-// comiss flags), so clobbering EFLAGS in the stub is safe.
-//
-// SPLICE: 0x004e9dcb. Sig-guard the 6 stock bytes 8B 0B 89 4C 24 08; refuse on
-// mismatch. Replace with E9 <rel32 -> stub> (5 bytes) + 0x90 NOP (1 byte, pads the
-// 6-byte stock window). Resume VA = 0x004e9dd1. We ENTERED via JMP so esp is unchanged
-// vs the original instruction stream => [esp+8] is the exact same outgoing-arg slot the
-// stock `mov [esp+8],ecx` would have written. The offset rides the SAME
-// CC_RIGHTPANE_X_FACTOR as the description-text bake (cc_text_early_bake) so the moved
-// box and its text stay aligned by construction. One-time .text edit — the engine runs
-// it per-frame; we do NOT poke per-frame (allowed category, same as the 0x004ED06D
-// backdrop splice and the 0x004F4FA5 text bake).
-#define CC_BOX_X_SPLICE_VA   0x004E9DCBu     // mov ecx,[ebx] (element X read)
-#define CC_BOX_X_SPLICE_LEN  6               // 8B 0B 89 4C 24 08
-#define CC_BOX_X_RESUME_VA   0x004E9DD1u     // fld dword [ebx+4] (first byte after the 6)
-
-static float  g_cc_box_x_thresh = 300.0f;            // design-X gate (>= => right box)
-static float  g_cc_box_x_offset = 0.0f;              // factor*(design_w-640), set at install
-static float  g_cc_kx           = 1.0f;              // backdrop stretch factor = design_w/640, set at install
-static float  g_cc_ky           = 1.0f;              // backdrop VERTICAL stretch = design_h/480, set at install
-// VERTICAL CENTERING (LIVE draw_capture diagnosis): the 8 backdrop tiles
-// are stock 640x512 (design). UNIFORM stretch kx=ky (round hexes) fills design_w
-// (640*kx=1706 @hs2.0) but OVERSHOOTS height (512*ky=1365 vs design_h=960) and the
-// stack is TOP-ANCHORED (top tile Y=0 pinned) -> the bright lower mosaic falls off the
-// bottom and the dark upper tiles dominate the visible viewport. Center the stretched
-// stack on the viewport by subtracting (512*ky - design_h)/2 from every tile Y-position.
-#define CC_BACKDROP_STOCK_H 512.0f                  // backdrop stack stock design height (live-measured)
-static float  g_cc_y_center     = 0.0f;             // = (CC_BACKDROP_STOCK_H*ky - design_h)/2, set at install
-static void  *g_cc_box_x_resume = (void *)CC_BOX_X_RESUME_VA;   // -> 0x004e9dd1
-static int    g_cc_box_x_installed = 0;
-
-// Naked stub: entered by JMP from 0x004e9dcb (esp unchanged => esp == E, the frame after
-// the fn prologue). Per the decompiled RenderChallengePanelElement_004e9d8c(int id, float
-// depth, float *pos, undefined4 *scale, ...): edi = param_2 = DEPTH; ebx = param_3 = pos
-// record (X at [ebx]); ebp = param_4 = scale record (scale_x at [ebp][0], normally 1.0).
-// DISCRIMINATOR: the backdrop tiles are the only elements emitted with depth 0xC61B3C00
-// (SetChallengePanelScale(id,0xC61B3C00,&pos) in both loops of RenderChallengePanelBackground);
-// menu buttons (FACE/HAIR/CHARACTER NAME, depth != 0xC61B3C00) and the class-info box use
-// other depths -- so edi==0xC61B3C00 selects ONLY the backdrop, never the CHARACTER NAME
-// button (which shares an element ID with a backdrop tile -- why the earlier id-gate
-// wrongly stretched it). Float work in xmm0/xmm1 (x87 stack untouched -> the live st0
-// Y-scale survives). EFLAGS dead at resume. eax/edx (lea'd at 0x004e9dc3/dc7) NOT clobbered.
-//
-// THREE paths under screen-id 12:
-// (1) BACKDROP TILE (depth 0xC61B3C00): horizontal STRETCH by kx=design_w/640 -- scale
-// the X-POSITION (write X*kx to [esp+8] = param_1[0] = LEFT) AND the X-SCALE (write
-// kx to [ebp][0] = scale_x => RenderUIPiece WIDTH = scale_x*x0 = kx*x0). Each tile's
-// span [X, X+x0] -> kx*[X, X+x0]; the 8 native tiles spread+widen to cover design
-// 0..design_w gap-free, NO duplicated columns, NO box-shift. Writing [ebp][0] is safe:
-// the scale record is a per-call stack local rebuilt to {1.0,1.0} each tile, so it
-// self-resets (no persistent mutation -> Challenge Mode / other panels untouched).
-// (2) CLASS-INFO BOX element (id NOT backdrop, design-X >= 300): rigid right-shift by
-// factor*(design_w-640) -- the original cc-box-move feature, unchanged.
-// (3) else: stock (left class list / non-char-create) -- mov ecx,[ebx]; mov [esp+8],ecx.
-__declspec(naked) static void cc_box_x_stub(void)
-{
-    __asm {
-        cmp   dword ptr ds:[0x00A165F0], 12          // screen-id == char-create?
-        jne   orig
-        cmp   edi, 0xC61B3C00                         // param_2 depth == backdrop tile depth?
-        jne   orig                                    // FIX C: non-backdrop char-create elements -> stock (no box-shift)
-        // (1) backdrop tile (depth 0xC61B3C00) -> proportional X stretch (pos + width)
-        // AND vertical Y stretch (height + lower-tile Y-position) so the 4:3-authored
-        // hex plane (design Y 0..576) fills design_h (the black-bottom fix, .
-        movss xmm0, dword ptr [ebx]                  // tile design X
-        mulss xmm0, dword ptr ds:[g_cc_kx]           // X * kx  (spread the left edge)
-        movss dword ptr [esp+8], xmm0                // -> param_1[0] (LEFT)
-        movss xmm1, dword ptr ds:[g_cc_kx]           // kx
-        movss dword ptr [ebp], xmm1                  // scale_x = kx => WIDTH = kx*x0 (widen)
-        // Y-SCALE (height): [ebp+4] is scale_y (read by the resumed code at 0x004e9de1
-        // fld [ebp+4]; the result lands in param_1[4]). ebp=param_4 is a per-call stack
-        // local rebuilt to {1,1,1,1} each tile, so this write self-resets (same safety as
-        // the [ebp] X-scale write). Height *= ky => plane bottom 576 -> 576*ky covers dh.
-        movss xmm2, dword ptr [ebp+4]                // tile scale_y (normally 1.0)
-        mulss xmm2, dword ptr ds:[g_cc_ky]           // scale_y *= ky => HEIGHT = ky*h0
-        movss dword ptr [ebp+4], xmm2                // -> param_1[4] (HEIGHT)
-        // Y-POSITION ([esp+0xC]) is computed AFTER this resume (fstp [esp+0xC] @0x004e9dd6),
-        // so it is stretched by the companion cc_box_y_stub spliced at 0x004e9df2.
-        jmp   dword ptr ds:[g_cc_box_x_resume]       // -> 0x004e9dd1
-    // FIX C: the threshold-gated additive box-shift (path-2, formerly `chkbox:`) was
-    // DELETED. The class-info panel's right edge is ALREADY baked to design_w (853.33)
-    // every frame via the anzz1 `hud.w` kBakes rows, so the extra shift — which keyed off
-    // an ANIMATED, selection-dependent X crossing a fixed 300px threshold — only made the
-    // box stride one page and flip back on the next selection. Non-backdrop char-create
-    // elements now fall straight through to the stock path below (Ephinea-faithful). The
-    // BACKDROP STRETCH path (g_cc_kx / g_cc_ky, above) is untouched.
-    orig:
-        mov   ecx, dword ptr [ebx]                   // stock: ecx = element X
-        mov   dword ptr [esp+8], ecx                 // stock: store X
-        jmp   dword ptr ds:[g_cc_box_x_resume]       // -> 0x004e9dd1
-    }
-}
-
-// Install the box-X splice. Sig-guarded (refuses unless the 6 stock bytes match) +
-// idempotent (installed flag). 4:3 no-op (design_w<=640 => not installed). Sets
-// g_cc_box_x_offset = CC_RIGHTPANE_X_FACTOR*(design_w-640) at install (char-create
-// design_w is always the front-end native 853.33 — HudScale doesn't apply front-end —
-// so the install-time offset is correct and never needs a per-frame recompute).
-static uint8_t g_cc_box_x_orig[CC_BOX_X_SPLICE_LEN] = {0};
-static void cc_box_x_install(void)
-{
-    if (g_cc_box_x_installed) return;
-    const float dw = hs_peek_f32(CC_DESIGNW_VA);
-    if (dw <= 640.0f) {                               // 4:3 hard no-op (never install)
-        log_line("[pso_widescreen] cc-box-x: SKIP (design_w=%.1f <= 640, 4:3 no-op)", dw);
-        return;
-    }
-    // Stock bytes at 0x004E9DCB: 8B 0B 89 4C 24 08.
-    static const uint8_t kExpected[CC_BOX_X_SPLICE_LEN] = {
-        0x8B, 0x0B, 0x89, 0x4C, 0x24, 0x08
-    };
-    const uint8_t *p = (const uint8_t *)(uintptr_t)CC_BOX_X_SPLICE_VA;
-    for (int i = 0; i < CC_BOX_X_SPLICE_LEN; ++i) {
-        if (p[i] != kExpected[i]) {
-            log_line("[pso_widescreen] cc-box-x: splice sig mismatch byte %d: "
-                     "got 0x%02x expected 0x%02x — refusing to hook", i, p[i], kExpected[i]);
-            return;
-        }
-        g_cc_box_x_orig[i] = p[i];
-    }
-    // Install-time offset = scale-invariant stride (factor*(design_w/HudScale-640)).
-    // SAME helper as cc_text_early_bake so box + description text stay locked together,
-    // and the class-list<->pane gap is identical at 1.0/1.5/2.0 (owner request .
-    g_cc_box_x_offset = cc_rightpane_offset(dw);
-    // Backdrop stretch factor kx = design_w/640 (1.333 @ front-end 853.33). Front-end
-    // design_w is fixed (HudScale doesn't apply to the front-end), so install-time is
-    // correct. dw>640 is guaranteed here (4:3 returns above) so kx>1.0; at 4:3 the splice
-    // is never installed => stock 4:3 backdrop (natural no-op).
-    g_cc_kx = dw / 640.0f;
-    // Backdrop VERTICAL stretch factor ky = kx (UNIFORM scaling). LIVE TEST proved
-    // ky = design_h/480 (=2.0 @hs2.0) is too small vs kx = design_w/640 (=2.667) — the
-    // hex cells render wider-than-tall (anisotropic). Poking ky live to 2.667 (=kx) made
-    // them uniform/round. So reuse the already-computed kx. dw>640 guaranteed here (4:3
-    // returns above) so kx>1.0 => the cc_box_y_install ky>1.0 guard still holds.
-    const float dh = hs_peek_f32(CC_DESIGNH_VA);     // design_h (=960 @hs2.0); feeds the centering offset
-    g_cc_ky = g_cc_kx;
-    // Center the uniformly-stretched (round-hex) backdrop on the viewport. The stack is
-    // stock 512 tall; *ky overshoots design_h, and the stub pins the top tile at Y=0, so
-    // subtract half the overshoot from every tile Y so the bright lower mosaic isn't shoved
-    // off-screen. Clamp >=0 (never pull a non-overshooting backdrop up off the top edge).
-    g_cc_y_center = (CC_BACKDROP_STOCK_H * g_cc_ky - dh) * 0.5f;
-    if (g_cc_y_center < 0.0f) g_cc_y_center = 0.0f;
-
-    DWORD old_prot = 0;
-    if (!VirtualProtect((LPVOID)(uintptr_t)CC_BOX_X_SPLICE_VA, CC_BOX_X_SPLICE_LEN,
-                        PAGE_EXECUTE_READWRITE, &old_prot)) {
-        log_line("[pso_widescreen] cc-box-x: VirtualProtect FAILED err=%lu", GetLastError());
-        return;
-    }
-    uint8_t patch[CC_BOX_X_SPLICE_LEN];
-    patch[0] = 0xE9;                                  // jmp rel32 -> stub
-    int32_t rel_to_stub = (int32_t)((uintptr_t)&cc_box_x_stub - (CC_BOX_X_SPLICE_VA + 5));
-    memcpy(patch + 1, &rel_to_stub, 4);
-    patch[5] = 0x90;                                  // NOP pads the 6th stock byte
-    memcpy((void *)(uintptr_t)CC_BOX_X_SPLICE_VA, patch, CC_BOX_X_SPLICE_LEN);
-    DWORD tmp = 0;
-    VirtualProtect((LPVOID)(uintptr_t)CC_BOX_X_SPLICE_VA, CC_BOX_X_SPLICE_LEN, old_prot, &tmp);
-    FlushInstructionCache(GetCurrentProcess(),
-                          (LPCVOID)(uintptr_t)CC_BOX_X_SPLICE_VA, CC_BOX_X_SPLICE_LEN);
-    g_cc_box_x_installed = 1;
-    log_line("[pso_widescreen] cc-box-x + backdrop-stretch armed @ 0x%08x -> stub 0x%p "
-             "(box_offset=%.1f thresh=%.1f kx=%.3f ky=%.3f dw=%.1f dh=%.1f factor=%.2f)",
-             (unsigned)CC_BOX_X_SPLICE_VA, (void *)&cc_box_x_stub,
-             g_cc_box_x_offset, g_cc_box_x_thresh, (double)g_cc_kx, (double)g_cc_ky,
-             dw, dh, (double)CC_RIGHTPANE_X_FACTOR);
-}
-
-// ============================================================
-// CHAR-CREATE HEX BACKDROP — VERTICAL (Y-POSITION) COMPANION SPLICE 
-// ============================================================
-// THE BLACK-BOTTOM FIX (companion to the cc_box_x_stub Y-SCALE write above).
-// In RenderChallengePanelElement_004e9d8c the element Y-POSITION output slot
-// ([esp+0xC] = param_1[1] consumed by RenderUIPiece_0082b6bc as vy = pos + tile*scale_y)
-// is COMPUTED at 0x004e9dd6 (fstp [esp+0xC]) — AFTER the cc_box_x_stub resume point
-// (0x004e9dd1), so the X stub cannot touch it. The 4:3-authored backdrop tiles sit at
-// design Y {0, 144, 288, 432} (top edges), bottom-most plane reaching design Y 576 of a
-// design_h that is 960 @hs2.0 -> the lower ~40% is black. We multiply EACH backdrop
-// tile's Y-position by ky=design_h/480 so the abutting stack spreads from the shared
-// origin (top tile Y=0 stays put) to fill design_h: {0,144,288,432}*ky and bottoms
-// 576*ky >= design_h. Together with the height *= ky in cc_box_x_stub this fills gap-free.
-//
-// SPLICE: 0x004e9df2 (stock `E8 8D 00 00 00` = call 0x004E9E84 GetChallengePanelElementPointer).
-// The Y-pos slot is live AND addressable here: 0x004e9df2 precedes the `push esi`
-// @0x004e9e13, so esp is still at store-level => [esp+0xC] is the SAME Y slot fstp wrote.
-// edi (param_2 DEPTH) is NOT clobbered between 0x004e9dcb and 0x004e9df2 (only ebx is
-// reloaded @0x004e9dda) => the edi==0xC61B3C00 backdrop discriminator is still valid.
-// The re-issued call reads edx; the stub touches only xmm2 + [esp+0xC] (no GP reg), so
-// edx/eax/ecx/ebx/edi all survive into the call. EFLAGS dead at resume (next is
-// `mov eax,[0xAF0370]`, no flag read).
-//
-// GATE (identical to the X backdrop branch): screen-id [0x00A165F0]==12 (char-create)
-// AND edi==0xC61B3C00 (backdrop tile depth). Off-gate => byte-identical: re-issue the
-// call, resume. 4:3 => cc_box_x_install returns before this installs (install no-op).
-// Sig-guarded (refuses unless the stock E8-call bytes match) + idempotent (installed flag);
-// the trampoline re-encodes the relative E8 call at the tramp address (cc_backdrop_install
-// idiom, since a byte-copied E8 would mis-target).
-#define CC_BOX_Y_SPLICE_VA    0x004E9DF2u     // call 0x004E9E84 (after the Y-pos fstp, before push esi)
-#define CC_BOX_Y_SPLICE_LEN   5               // E8 8D 00 00 00
-#define CC_BOX_Y_RESUME_VA    0x004E9DF7u     // first byte after the spliced call
-#define CC_BOX_Y_CALL_TGT_VA  0x004E9E84u     // GetChallengePanelElementPointer (re-issued)
-
-static uint8_t  g_cc_box_y_orig[CC_BOX_Y_SPLICE_LEN] = {0};
-static void    *g_cc_box_y_tramp = NULL;      // RWX: re-issue call + E9 resume
-static int      g_cc_box_y_installed = 0;
-static void    *g_cc_box_y_resume = (void *)CC_BOX_Y_RESUME_VA;   // -> 0x004e9df7
-
-// Naked stub: entered by JMP from 0x004e9df2 (esp unchanged). Gate on screen-id 12 +
-// edi==backdrop-depth; on gate scale the Y-position slot [esp+0xC] by ky (xmm only ->
-// GP regs + x87 stack untouched). Then jmp the trampoline (re-issues `call 0x004E9E84`
-// then E9 -> 0x004e9df7). Off-gate skips the math and falls through to the same tramp.
-__declspec(naked) static void cc_box_y_stub(void)
-{
-    __asm {
-        cmp   dword ptr ds:[0x00A165F0], 12          // screen-id == char-create?
-        jne   resume
-        cmp   edi, 0xC61B3C00                         // param_2 depth == backdrop tile depth?
-        jne   resume                                  // (box/list/buttons use other depths)
-        movss xmm2, dword ptr [esp+0x0C]              // backdrop tile Y-position
-        mulss xmm2, dword ptr ds:[g_cc_ky]            // Y *= ky => spread down (uniform, round hexes)
-        subss xmm2, dword ptr ds:[g_cc_y_center]      // - (512*ky - design_h)/2 => CENTER on viewport
-        movss dword ptr [esp+0x0C], xmm2              // -> param_1[1] (TOP)
-    resume:
-        jmp   dword ptr ds:[g_cc_box_y_tramp]         // re-issue call 0x004E9E84, then -> 0x004e9df7
-    }
-}
-
-// Install the Y-position companion splice. Trampoline built manually (the spliced
-// instruction is a relative E8 call that must be RE-ENCODED at the tramp address, not
-// byte-copied) — same idiom as the retired cc_backdrop_install. Sig-guarded + idempotent.
-// Call ONLY after cc_box_x_install (which sets g_cc_ky and is the 4:3 gate); this fn
-// additionally no-ops when g_cc_ky<=1.0 so a 4:3 / mis-ordered call never patches.
-static void cc_box_y_install(void)
-{
-    if (g_cc_box_y_installed) return;
-    if (g_cc_ky <= 1.0f) {                            // 4:3 / not-yet-computed => no-op
-        log_line("[pso_widescreen] cc-box-y: SKIP (ky=%.3f <= 1.0, 4:3 no-op)", (double)g_cc_ky);
-        return;
-    }
-    // Stock bytes at 0x004E9DF2: E8 8D 00 00 00 = call 0x004E9E84 (re-issued by the tramp).
-    static const uint8_t kExpected[CC_BOX_Y_SPLICE_LEN] = {
-        0xE8, 0x8D, 0x00, 0x00, 0x00
-    };
-    const uint8_t *p = (const uint8_t *)(uintptr_t)CC_BOX_Y_SPLICE_VA;
-    for (int i = 0; i < CC_BOX_Y_SPLICE_LEN; ++i) {
-        if (p[i] != kExpected[i]) {
-            log_line("[pso_widescreen] cc-box-y: splice sig mismatch byte %d: "
-                     "got 0x%02x expected 0x%02x — refusing to hook", i, p[i], kExpected[i]);
-            return;
-        }
-        g_cc_box_y_orig[i] = p[i];
-    }
-    // Trampoline (RWX): re-issue the original call (correctly relocated) then E9 back.
-    // [0]  E8 <rel32 -> 0x004E9E84>
-    // [5]  E9 <rel32 -> 0x004E9DF7>
-    void *page = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE,
-                              PAGE_EXECUTE_READWRITE);
-    if (!page) {
-        log_line("[pso_widescreen] cc-box-y: trampoline alloc FAILED err=%lu", GetLastError());
-        return;
-    }
-    uint8_t *t = (uint8_t *)page;
-    t[0] = 0xE8;
-    int32_t rel_call = (int32_t)(CC_BOX_Y_CALL_TGT_VA - ((uintptr_t)t + 5));
-    memcpy(t + 1, &rel_call, 4);
-    t[5] = 0xE9;
-    int32_t rel_resume = (int32_t)(CC_BOX_Y_RESUME_VA - ((uintptr_t)t + 10));
-    memcpy(t + 6, &rel_resume, 4);
-    g_cc_box_y_tramp = page;
-
-    // Write the E9 splice at 0x004E9DF2 (exactly 5 bytes == the original call's length,
-    // so no NOP padding is needed).
-    DWORD old_prot = 0;
-    if (!VirtualProtect((LPVOID)(uintptr_t)CC_BOX_Y_SPLICE_VA, CC_BOX_Y_SPLICE_LEN,
-                        PAGE_EXECUTE_READWRITE, &old_prot)) {
-        log_line("[pso_widescreen] cc-box-y: VirtualProtect FAILED err=%lu", GetLastError());
-        return;
-    }
-    uint8_t patch[CC_BOX_Y_SPLICE_LEN];
-    patch[0] = 0xE9;                                  // jmp rel32 -> stub
-    int32_t rel_to_stub = (int32_t)((uintptr_t)&cc_box_y_stub - (CC_BOX_Y_SPLICE_VA + 5));
-    memcpy(patch + 1, &rel_to_stub, 4);
-    memcpy((void *)(uintptr_t)CC_BOX_Y_SPLICE_VA, patch, CC_BOX_Y_SPLICE_LEN);
-    DWORD tmp = 0;
-    VirtualProtect((LPVOID)(uintptr_t)CC_BOX_Y_SPLICE_VA, CC_BOX_Y_SPLICE_LEN, old_prot, &tmp);
-    FlushInstructionCache(GetCurrentProcess(),
-                          (LPCVOID)(uintptr_t)CC_BOX_Y_SPLICE_VA, CC_BOX_Y_SPLICE_LEN);
-    g_cc_box_y_installed = 1;
-    log_line("[pso_widescreen] cc-box-y (hex bottom-fill) armed @ 0x%08x -> stub 0x%p "
-             "tramp 0x%p (ky=%.3f)",
-             (unsigned)CC_BOX_Y_SPLICE_VA, (void *)&cc_box_y_stub, g_cc_box_y_tramp,
-             (double)g_cc_ky);
-}
+// REMOVED: char-create class-info-box right-shift + hex-backdrop stretch splice
+// (cc_box_x_* / cc_box_y_*). Ephinea applies NO per-draw RenderChallengePanelElement
+// splice and NO tile scaling for char-create; its delta is the static design-width
+// widenings + honeycomb-frame + right-gradient widths/colors in kBakes[]. Deleted to
+// match Ephinea 1:1. (cc_rightpane_offset / CC_RIGHTPANE_X_FACTOR are KEPT — still used
+// by the char-create description-text bake cc_text_early_bake.)
 
 // REFACTOR: RETIRED with the Sodaboy path —
 // HUD_VANILLA / REF_W / REF_H (dead Sodaboy HUD-rect reference),
@@ -3288,24 +2962,12 @@ static void apply_startup_bakes(int render_w)
     // scene 5 (front-end nav is server-blocked tonight) — do NOT re-add it unverified.
     // See memory: charcreate-source-bake-mistargeted-wordselect.
 
-    // ---- Scene 09 char-create class-select INFO BOX (the blue 9-slice panel): SHIFT RIGHT
-    // (live RE on PSOBB.IO @ screen-id [0x00A165F0]==12, disasm-verified).
-    // The big blue 9-slice info panel on the right (cyan 9-slice frame + 4 class previews +
-    // "Hunter" banner + "Enter OK" prompt + name labels) sits design 307->607 (SCREEN
-    // 690.75->1365.75 @ the 2D affine SCALE_X 0x00ACC0E8 == 2.25, 16:9 hs1.0), leaving a
-    // big empty gap on its right -> visibly off-center in 16:9. We shift the WHOLE box right
-    // so it rides with the (separately baked) class-description text and balances the layout.
-    //
-    // box X now handled by the unified RenderChallengePanelElement splice (cc_box_x_*), see below.
-    //
-    // The earlier attempt baked 10 mov-imm32 X immediates inside
-    // ChallengeObjectSubPanel_UpdateVisuals_004f4a00. Live draw_capture PROVED that did NOT
-    // move the box: every box element reads its X from a HEAP struct ([ebx]) inside
-    // RenderChallengePanelElement_004e9d8c, NOT from those immediates (which fed culled /
-    // irrelevant sub-elements). Those 10 bakes are REVERTED — leaving them in would DOUBLE
-    // the offset now that the splice owns the shift. The single clean lever is the one-time
-    // .text splice in cc_box_x_install() (see CC_BOX_X_SPLICE_VA), which the game's own code
-    // runs each frame and which offsets the heap X on the right-pane path only.
+    // ---- Scene 09 char-create class-select INFO BOX (the blue 9-slice panel):
+    // NO box-shift. Ephinea does NOT slide the class-info box for char-create; the
+    // box rides design_w via the static `hud.w` widenings only. The old per-draw
+    // RenderChallengePanelElement right-shift splice (and the earlier 10 mov-imm32
+    // ChallengeObjectSubPanel bakes, which Live draw_capture proved did NOT move the
+    // box — every element reads its X from a HEAP struct [ebx]) are both removed.
 
     // ---- F_VPRESET in-game 2D-affine SCALE_X/Y source bakes (16:9 in-game wide-fill)
     // F_VPRESET (0x0082F5D8) stamps the in-game 2D affine (0x00ACC0E8/EC) back to a
@@ -4018,7 +3680,20 @@ static const bake_t kBakes[] = {
   { 0x009A6914, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x009B8D0C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x009B8D54, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
-  { 0x009B8DC4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  /* 0x009B8DC4 = char-select right-gradient width (Ephinea csel.grad.w). Static .data
+     float, stock 0x44200000 (640.0); widen to design_w. Was an anzz1 GATE_ALWAYS "hud.w"
+     row writing the identical value — re-attributed/gated to Ephinea's char-select delta
+     (same written value, now stock-guarded). 0x009B8D08/D50 are NOT here: they're written
+     at runtime by the .text imms at 0x004EB4AA/0x004EB4F0 (already in kBakes as hud.w). */
+  { 0x009B8DC4, K_SET, B_A, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44200000, "csel.grad.w", B_LIT },
+  /* char-select right-gradient COLOR bytes (Ephinea). K_U8 = 1-byte literal write; value
+     = coeff (base==B_LIT). stock = the stock byte for the sig-guard (skip if it doesn't match). */
+  { 0x009B8DB7, K_U8, B_LIT, 255.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000EC, "csel.grad.color", B_LIT },  /* 0xEC -> 0xFF */
+  { 0x009B8DBB, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
+  { 0x009B8DBF, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
+  { 0x009B8DC3, K_U8, B_LIT, 255.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000EC, "csel.grad.color", B_LIT },  /* 0xEC -> 0xFF */
+  { 0x009B8DEB, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
+  { 0x009B8DEF, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
   { 0x009B8DDC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009D0040, K_SET, B_A, 0.5f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009D0044, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
@@ -4208,37 +3883,12 @@ static const bake_t kBakes[] = {
   { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_TRINITY, GATE_ALWAYS, 0x44084000, "fe.login.botright.x MOD_X_R +right (stock 545)", B_LIT },
   { 0x009F24E4, K_SET, B_A, 0.5f, 168.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F40000, "ig.team_invitation_explanation_submenu.x (MOD_X_C)", B_LIT },
   { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_bg_texture.x (MOD_X_C; offset 0)", B_LIT },
-  /* ---- SRC_TRINITY : dressing-room hex tiles (static x hud_scale, Trinity ResolutionPatch) ---- */
-  /* All 24 are Trinity mode-1/hudScaleY rows; in our affine model that == x hud_scale
-     (design_h/480) because the tiles ride affine_y=render_h/design_h. No-op at hud_scale 1.0,
-     x2.0 at HudScale 2.0. RMW caches the stock on first apply (stock 0x00000000 = uncached). */
-  { 0x0091DBD0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBD8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBDC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBE8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBEC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBF0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBF8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DBFC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DC00, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DC04, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DC08, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x0091DC0C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.pos", B_LIT },
-  { 0x009B77D0, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B77D2, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B77E4, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B77E6, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B77F8, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B77FA, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B780C, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B780E, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B7820, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B7822, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B7834, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
-  { 0x009B7836, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_TRINITY, GATE_CHARSELECT, 0x00000000, "dr.tile.wh", B_LIT },
+  /* REMOVED: 24 FIX-D dressing-room hex-tile rows (dr.tile.pos 0x0091DBxx +
+     dr.tile.wh 0x009B77xx). Ephinea does NOT scale char-create tiles — deleted
+     to match its delta. (K_U16 kind left defined for future use.) */
   /* ---- SRC_OURS : 27 rows ---- */
   { 0x004EC0AF, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x44230000, "dr.honeycomb.enter_exit.right_edge  WRITTEN VALUE = st", B_LIT },
-  { 0x004EC951, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x442A0000, "dr.honeycomb.transition.right_edge  WRITTEN VALUE = st", B_LIT },
+  { 0x004EC951, K_SET, B_A, 1.0625f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x442A0000, "csel.honeycomb.frame", B_LIT },  /* 1.0625=680/640; res-scales design_w like Ephinea (1.0625*853.33~906). .text imm32 <0x008F8000 => icache flush. */
   { 0x006F49FD, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.outer.mag (code imm32 of `push 430.0`; ONE-S", B_LIT },
   { 0x006F4A57, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.inner.mag (code imm32 of `push 178.0`; ONE-S", B_LIT },
   { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "bb.line.cleanup.1; NOP 5 bytes over CALL 0x0082b558 (t", B_LIT },
@@ -4361,6 +4011,27 @@ static void apply_bakes(const ws_scale_ctx *s)
                 continue;
             }
 
+            /* K_U8 — 1-byte literal write (char-select gradient colors). Self-contained
+               like K_U16 (the shared uint32 path would clobber 3 neighbouring bytes).
+               Colors don't scale: expr == coeff (base==B_LIT, offset==0) == the target
+               byte. Sig-guard against the live byte == (uint8_t)b->stock (the stock color)
+               so a foreign/already-changed site is refused; idempotent if already ours.
+               All these VAs are >0x008F8000 => no icache flush. */
+            if (b->kind == K_U8) {
+                uint8_t want8 = (uint8_t)expr;
+                uint8_t live8 = *(volatile uint8_t *)(uintptr_t)b->va;
+                if (live8 == want8) { n_skip++; continue; }                    /* idempotent */
+                if (b->stock && live8 != (uint8_t)b->stock) { n_guard++; continue; }  /* foreign site */
+                DWORD old8, tmp8;
+                if (!VirtualProtect((LPVOID)(uintptr_t)b->va, 1, PAGE_EXECUTE_READWRITE, &old8)) continue;
+                *(volatile uint8_t *)(uintptr_t)b->va = want8;
+                VirtualProtect((LPVOID)(uintptr_t)b->va, 1, old8, &tmp8);
+                if (b->va < 0x008F8000u)  /* these color VAs are >0x008F8000 => no icache flush */
+                    FlushInstructionCache(GetCurrentProcess(), (LPCVOID)(uintptr_t)b->va, 1);
+                n_set++;
+                continue;
+            }
+
             if (b->kind == K_NOP) {
                 want = 0;  /* sentinel; handled below */
             } else if (b->kind == K_U32) {
@@ -4464,40 +4135,11 @@ static void apply_static_patches(const ws_scale_ctx *s)
     // 4:3-identity by construction; calls apply_special() internally.
     apply_bakes(s);
 
-    // (3) char-create hex-backdrop 16:9 fill — install the tail-splice on
-    // RenderChallengePanelBackground_004ed008 that emits extra static
-    // background-tile column(s) at design X=640.. until the columns cover
-    // design_w. NOT a per-frame composer poke: it drives the engine's own
-    // SetChallengePanelScale with a static {X,Y} struct (the same emit path the
-    // engine uses for its 8 tiles). Runtime-gated to char-create (screen-id==12)
-    // AND design_w>640 (4:3 no-op), so the always-present .text splice is inert
-    // everywhere else. Shares the PatchCharSelect escape hatch.
-    if (g_cfg.patch_charselect) {
-        // (1c) char-create BACKDROP fill — REWORKED from duplicate-column fill
-        // to a true horizontal STRETCH (owner: "stretch quads, don't duplicate").
-        // The duplicate-fill splice @0x004ED06D is RETIRED (cc_backdrop_install no
-        // longer called); the stretch is folded into cc_box_x_install's stub, which
-        // now scales each backdrop tile's X-position AND X-scale by kx=design_w/640
-        // (id 0x0C..0x11, screen-id 12). That also SUBSUMES the old self-inflicted
-        // +128 LOOP2 shift (the box splice was grabbing the design-X=384 backdrop
-        // tiles), closing the internal 384..512 gap without any extra columns.
-        // (1d) char-create class-select INFO BOX rigid right-shift + BACKDROP stretch —
-        // one .text splice on RenderChallengePanelElement_004e9d8c. Box elements
-        // (design-X>=300) shift by CC_RIGHTPANE_X_FACTOR*(design_w-640); backdrop
-        // tiles (depth 0xC61B3C00) stretch X by design_w/640 AND height by
-        // design_h/480. screen-id==12 gated; 4:3 (design_w<=640) install no-op.
-        cc_box_x_install();
-        // (1e) char-create hex BACKDROP vertical bottom-fill — companion
-        // splice @0x004e9df2 that scales each backdrop tile's Y-POSITION by
-        // design_h/480 so the 4:3-authored hex plane (design Y 0..576) reaches the
-        // bottom of a 16:9 frame (was solid black below ~55%). Same screen-id==12 +
-        // depth==0xC61B3C00 gate; reads g_cc_ky set by cc_box_x_install (must run
-        // AFTER it); 4:3 / ky<=1.0 => install no-op. Title hex is a DIFFERENT path
-        // (sub_00415ab0 -> RenderUIQuad 0x0082B440), so it is untouched.
-        cc_box_y_install();
-    } else {
-        log_line("[pso_widescreen] cc-backdrop hex-fill: SKIP (PatchCharSelect=0)");
-    }
+    // (3) REMOVED — the char-create class-info-box right-shift + hex-backdrop
+    // stretch splice (cc_box_x_install / cc_box_y_install) is gone. Ephinea does
+    // NOT splice RenderChallengePanelElement and does NOT scale char-create tiles;
+    // its delta is the static design-width widenings + honeycomb frame + right-
+    // gradient widths/colors that now live entirely in kBakes[] (applied above).
 
     // (4) psobb.io patch-server news/status screen (Trinity AdDrawLineTask
     // @0x00408C9D): right/bottom-anchor the MOTD box geometry. This stays a
