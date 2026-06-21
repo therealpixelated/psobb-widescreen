@@ -3833,10 +3833,10 @@ static const bake_t kBakes[] = {
   { 0x00410632, K_SET, B_A, 1.0f, -208.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D80000, "csel.tabdetails.x", B_LIT },
   { 0x0041066B, K_SET, B_A, 1.0f, -208.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D80000, "csel.tabdetails.x", B_LIT },
   { 0x00410672, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.tab.details_off.y MOD_Y_B (stock 421)", B_LIT },
-  { 0x004137C2, K_SET, B_A, 0.5f, -164.0f, SRC_TRINITY, GATE_CHARSELECT, 0x431C0000, "csel.footer.enter.x (.text imm; stock156 + (A-640)/2);", B_LIT },
+  /* 0x004137C2 csel.footer.enter.x: Ephinea does NOT patch this (absent from delta) — it is left at stock 156 so it rides to the left edge in widescreen (Ephinea footer spread = Enter-left / Cancel-center / Tab-right). Our prior SRC_TRINITY center-anchor (0.5*A-164) removed to match Ephinea. */
   { 0x004137C9, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.enterkey.y MOD_Y_B (stock 421)", B_LIT },
   { 0x004137D7, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.esckey.y MOD_Y_B (stock 421)", B_LIT },
-  { 0x004137DE, K_SET, B_A, 0.5f, 112.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43D80000, "csel.footer.details.x (.text imm orphan; stock432 + (A", B_LIT },
+  /* 0x004137DE csel.footer.details.x: orphan imm + absent from the Ephinea delta — left at stock (no SRC_TRINITY patch, to match Ephinea). */
   { 0x004EC0BE, K_SET, B_C, 1.0f, 12.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F60000, "dr.honeycomb.bottom.y MOD_Y_B (stock 492)", B_LIT },
   { 0x004ED0BF, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.leftgrad.botL.y MOD_Y_B (stock 600)", B_LIT },
   { 0x004ED0D3, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.leftgrad.botR.y MOD_Y_B (stock 600)", B_LIT },
