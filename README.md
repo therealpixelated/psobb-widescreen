@@ -19,9 +19,15 @@ through a single 2D affine at draw time. Widescreen = (1) widen the design size 
 element to the correct edge/center of the wider canvas; (3) keep screen-space
 effects (photon/vignette/etc.) from inheriting the wide affine. Ephinea does this
 with a **3-stage runtime cascade** (config → render-size → bulk anchor apply) plus a
-**4-handler per-draw detour layer**. We reproduce the same *result* with a
-**single-boot bake** of the design size + anchor table and the same four per-draw
-detours — installed once, **no per-frame rebakes**.
+**4-handler per-draw detour layer**. We reproduce the same *result* with a single
+**declarative bake table** (`kBakes[]`): every engine-memory coordinate write is one
+row — `value = (coeff·base + offset)·base2`, resolved from the live scale so 4:3 is a
+structural no-op — applied by one value-guarded pass (`apply_bakes`), plus the same
+per-draw detours and an **overwrite guard** that re-asserts the table if another
+wrapper/mod clobbers a site. Installed once; **no per-frame rebakes**. The whole mod
+is one `pso_widescreen.c` + `pso_widescreen.h`; anzz1's address lists and every
+per-element poke are folded into the table with per-row attribution
+(anzz1 / Ephinea / Trinity / ours).
 
 The complete reverse-engineering of Ephinea's implementation — every one of the
 **956 hooks** it installs, named and classified — is in
@@ -33,8 +39,11 @@ the spec this mod is ported from.
 ## Repository layout
 
 ```
-asi/                  # the mod source — the pso_widescreen ASI (C + inline x86)
-                      #   build.bat -> pso_widescreen.asi ; pso_widescreen.ini config
+asi/                  # the mod source — ONE pso_widescreen.c + pso_widescreen.h
+                      #   kBakes[] bake table + apply_bakes/apply_special + per-draw
+                      #   detours + overwrite guard.  build.bat -> pso_widescreen.asi
+                      #   pso_widescreen.ini config
+                      #   mod_boot_poster.c / mod_video.c / asset_registry.* — optional modules
 docs/                 # the reverse-engineering: how Ephinea's widescreen works
   EPHINEA_HOOKS_FULL_RE.md      # ⭐ full RE of all 956 Ephinea->PsoBB hooks (the port spec)
   hooks_re/                     # the 956-hook inventory table, cascade deep-dives, raw data
