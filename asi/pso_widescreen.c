@@ -2304,7 +2304,7 @@ __declspec(naked) static void cc_box_x_stub(void)
         cmp   dword ptr ds:[0x00A165F0], 12          // screen-id == char-create?
         jne   orig
         cmp   edi, 0xC61B3C00                         // param_2 depth == backdrop tile depth?
-        jne   chkbox                                  // (menu buttons/box use other depths)
+        jne   orig                                    // FIX C: non-backdrop char-create elements -> stock (no box-shift)
         // (1) backdrop tile (depth 0xC61B3C00) -> proportional X stretch (pos + width)
         // AND vertical Y stretch (height + lower-tile Y-position) so the 4:3-authored
         // hex plane (design Y 0..576) fills design_h (the black-bottom fix, .
@@ -2323,21 +2323,13 @@ __declspec(naked) static void cc_box_x_stub(void)
         // Y-POSITION ([esp+0xC]) is computed AFTER this resume (fstp [esp+0xC] @0x004e9dd6),
         // so it is stretched by the companion cc_box_y_stub spliced at 0x004e9df2.
         jmp   dword ptr ds:[g_cc_box_x_resume]       // -> 0x004e9dd1
-    chkbox:
-        // (2) class-info box element: rigid right-shift if design-X >= 300.
-        // GATED to char-create sub-page 0 (class-select) only. The appearance /
-        // dressing-room sub-pages (0x00A7223C != 0) draw the OK/Back, Character-Name
-        // and menu-cursor elements, which already land via their OWN .data source
-        // anchors (patch_dressingroom_layout, Trinity MOD_X_R). Shifting them here too
-        // double-moved them off-screen. Box striding is retained on the class-select page.
-        cmp   dword ptr ds:[0x00A7223C], 0           // char-create sub-page == 0 (class-select)?
-        jne   orig                                    // appearance/sub-pages -> ride own source
-        movss xmm0, dword ptr [ebx]                  // element X
-        comiss xmm0, dword ptr ds:[g_cc_box_x_thresh] // X >= 300 ?
-        jb    orig                                    // design-X < 300 (left list) -> no shift
-        addss xmm0, dword ptr ds:[g_cc_box_x_offset] // + factor*span
-        movss dword ptr [esp+8], xmm0                // store shifted X into the arg slot
-        jmp   dword ptr ds:[g_cc_box_x_resume]       // -> 0x004e9dd1
+    // FIX C: the threshold-gated additive box-shift (path-2, formerly `chkbox:`) was
+    // DELETED. The class-info panel's right edge is ALREADY baked to design_w (853.33)
+    // every frame via the anzz1 `hud.w` kBakes rows, so the extra shift — which keyed off
+    // an ANIMATED, selection-dependent X crossing a fixed 300px threshold — only made the
+    // box stride one page and flip back on the next selection. Non-backdrop char-create
+    // elements now fall straight through to the stock path below (Ephinea-faithful). The
+    // BACKDROP STRETCH path (g_cc_kx / g_cc_ky, above) is untouched.
     orig:
         mov   ecx, dword ptr [ebx]                   // stock: ecx = element X
         mov   dword ptr [esp+8], ecx                 // stock: store X
@@ -2952,74 +2944,14 @@ __declspec(dllexport) volatile float pso_widescreen_charscreen_shift_y = 0.0f;
 // are RETIRED with the Sodaboy path. The dllexport pso_widescreen_charscreen_*
 // tuner globals above are KEPT for external (tuner) ABI compatibility.
 
-// Splash widescreen phase-2 (D3 fold, widens the SEGA/boot splash
-// sprite-quad table at 0x009A3420 (4 entries × 0x20 stride, x1@+0x00, x2@+0x08).
-// Stock layout {0,319},{0,319},{320,639},{320,639}; we multiply the X coords by
-// 4/3 to fill a 16:9+ viewport. Now ALWAYS-ON on the default path (folded into
-// apply_static_patches), gated only by its own PatchSplashPhase2 knob (D1).
-//
-// VA-OVERLAP AUDIT (vs the anzz1 atlas / listHUDWidth): the 8 target VAs are
-// x1: 0x9A3420, 0x9A3440, 0x9A3460, 0x9A3480   (stock 0/0/320/320)
-// x2: 0x9A3428, 0x9A3448, 0x9A3468, 0x9A3488   (stock 319/319/639/639)
-// The anzz1 sprite atlas is 0x9A3840..0x9A38D8 — NO overlap there. BUT anzz1's
-// listHUDWidth contains TWO of these splash VAs — 0x9A3468 and 0x9A3488 — to
-// which anzz1 writes the horizontal extent A (the right-quad x2). To keep anzz1
-// authoritative for the HUD extent (and avoid a double-bake where splash's
-// 639*4/3 would clobber anzz1's exact A at non-16:9 aspects), this function
-// SKIPS those two VAs. The other 6 splash coords (anzz1-free) are widened.
-#define kSplashAnzz1OwnedX2A 0x009A3468u   // entry 2 x2 — anzz1 listHUDWidth (A)
-#define kSplashAnzz1OwnedX2B 0x009A3488u   // entry 3 x2 — anzz1 listHUDWidth (A)
-static void apply_splash_phase2(void)
-{
-    if (!g_cfg.patch_splash_phase2) {
-        log_line("[pso_widescreen] splash-phase2: SKIP (PatchSplashPhase2=0)");
-        return;
-    }
-    const uintptr_t kTableVA = 0x009A3420u;
-    const unsigned  kEntries = 4;
-    const unsigned  kStride  = 0x20;
-    const float     stock_x[4][2] = {
-        {   0.0f, 319.0f },
-        {   0.0f, 319.0f },
-        { 320.0f, 639.0f },
-        { 320.0f, 639.0f },
-    };
-    // P5 D2: parameterize on the live extent (g_scale.A/640 = canvas/640).
-    // IDENTITY GUARD: g_scale.A/640 is bit-identical to the legacy 4/3 ONLY at
-    // 16:9 (both 0x3FAAAAAB); at a non-16:9 aspect it differs from today's
-    // unconditional 4/3. Keep the EXACT legacy 4/3 at the lever-off default
-    // (byte-identical at ANY aspect, matching today's build); diverge to the live
-    // canvas/640 only when hs != 1.0.
-    const float sp_hs = g_cfg.hud_scale;
-    const float stretch = (sp_hs > 0.999f && sp_hs < 1.001f)
-                              ? (4.0f / 3.0f)         // legacy default (byte-identical)
-                              : (g_scale.A / 640.0f); // live canvas/640 at hs != 1.0
-    int skipped = 0;
-    for (unsigned i = 0; i < kEntries; i++) {
-        uintptr_t base = kTableVA + i * kStride;
-        const uintptr_t x1_va = base + 0x00;
-        const uintptr_t x2_va = base + 0x08;
-        DWORD old_prot = 0;
-        if (!VirtualProtect((LPVOID)base, kStride, PAGE_EXECUTE_READWRITE, &old_prot)) {
-            log_line("[pso_widescreen] splash-phase2: VirtualProtect FAILED entry=%u err=%lu",
-                     i, GetLastError());
-            continue;
-        }
-        *(float *)x1_va = stock_x[i][0] * stretch;
-        // De-conflict vs anzz1: leave the 2 right-quad x2 coords anzz1 owns.
-        if (x2_va == kSplashAnzz1OwnedX2A || x2_va == kSplashAnzz1OwnedX2B) {
-            ++skipped;
-        } else {
-            *(float *)x2_va = stock_x[i][1] * stretch;
-        }
-        DWORD tmp = 0;
-        VirtualProtect((LPVOID)base, kStride, old_prot, &tmp);
-        FlushInstructionCache(GetCurrentProcess(), (LPCVOID)base, kStride);
-    }
-    log_line("[pso_widescreen] splash-phase2: 0x009A3420 table stretched x%.4f "
-             "(4 entries, %d x2-coord(s) left to anzz1: 0x9A3468/0x9A3488)",
-             stretch, skipped);
-}
+// FIX B: apply_splash_phase2() was DELETED. It sprite-scaled the six SEGA-splash
+// left/seam coords (0x009A3420/3428/3440/3448/3460/3480) by 4/3, which over-stretched
+// "SONIC TEAM(TM)" and dragged the blank right quad over the TM. Ephinea widens ONLY
+// the two right-quad x2 coords (0x009A3468/0x009A3488), which we keep via the anzz1
+// SRC_ANZZ1 "hud.w" kBakes rows. The function had no callers; the kBakes GATE_SPLASH
+// rows that did the same six widenings were deleted alongside it. The g_cfg
+// patch_splash_phase2 field is retained for cfg-ABI compatibility but no longer
+// widens anything.
 
 // ============================================================
 // d3d8to11 logical-canvas hint 
@@ -4214,7 +4146,8 @@ static const bake_t kBakes[] = {
   { 0x0091D988, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44178000, "dr.toprow.ok_back.x  WRITTEN VALUE = stock(606.0)+ (s-", B_LIT },
   { 0x0091DC74, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44170000, "dr.charname.field.x  WRITTEN VALUE = stock(604.0)+ (s-", B_LIT },
   { 0x0091DD1C, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44198000, "dr.botrow.ok_back.x  WRITTEN VALUE = stock(614.0)+ (s-", B_LIT },
-  { 0x0096E27C, K_SET, B_LIT, 165.0f, 0.0f, SRC_EPHINEA, GATE_STREAK_SCALE, 0x42F80000, "streak.scale.x (Ephinea byte-delta 124.0->165.0, the [", B_LIT },
+  { 0x0096E27C, K_SET, B_HUDSCALE, 165.0f, 0.0f, SRC_EPHINEA, GATE_STREAK_SCALE, 0x42F80000, "streak.scale.x = 165*hud_scale (cancels 2.25/hud_scale front-end affine to ~371px; =165 @hs1.0 so 0x42F80000 stock-guard holds, 4:3 no-op)", B_LIT },
+  { 0x0096E278, K_SET, B_HUDSCALE, 201.0f, 0.0f, SRC_EPHINEA, GATE_STREAK_SCALE, 0x43490000, "streak.scale.y = 201*hud_scale (stock 0x43490000=201.0 from on-disk exe; =201 @hs1.0 guarded no-op, engages only hs>1)", B_LIT },
   { 0x00972148, K_SET, B_A, 0.5f, -233.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42AE0000, "csel.banner.x (stock87 + half)", B_LIT },
   /* ---- SRC_TRINITY : 58 rows ---- */
   { 0x004013A7, K_SET, B_A, 1.0f, -1.0f, SRC_TRINITY, GATE_CHARSELECT, 0x441FC000, "csel.backdrop.w (far-corner X; MOD_X_R; 639->design_w-", B_LIT },
@@ -4293,12 +4226,10 @@ static const bake_t kBakes[] = {
   { 0x0096E174, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[3] (stock -79; ONE-SHOT live*hud_scale)", B_LIT },
   { 0x0096E178, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[4] (stock 0; ONE-SHOT live*hud_scale)", B_LIT },
   { 0x0096E17C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[5] (stock 156; ONE-SHOT live*hud_scale)", B_LIT },
-  { 0x009A3420, K_SET, B_A, 0.0f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e0.x1; stock 0.0 * stretch. stretch=4/3 @hs1.0 ", B_LIT },
-  { 0x009A3428, K_SET, B_A, 0.4984375f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e0.x2; stock 319.0 * stretch. At hs!=1.0 = 319*", B_LIT },
-  { 0x009A3440, K_SET, B_A, 0.0f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e1.x1; stock 0.0 * stretch -> 0. No sig-guard. ", B_LIT },
-  { 0x009A3448, K_SET, B_A, 0.4984375f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e1.x2; stock 319.0 * stretch = 319*A/640 @hs!=1", B_LIT },
-  { 0x009A3460, K_SET, B_A, 0.5f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e2.x1; stock 320.0 * stretch = 320*A/640 @hs!=1", B_LIT },
-  { 0x009A3480, K_SET, B_A, 0.5f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e3.x1; stock 320.0 * stretch = 320*A/640 @hs!=1", B_LIT },
+  /* FIX B: the six GATE_SPLASH left/seam coords (0x009A3420/3428/3440/3448/3460/3480)
+     were DELETED — sprite-scaling them over-stretched "SONIC TEAM(TM)" and dragged the
+     blank right quad over the TM. Ephinea widens ONLY the two right-quad x2 coords
+     (0x009A3468/0x009A3488), kept via the anzz1 SRC_ANZZ1 "hud.w" rows above. */
   { 0x00A1132C, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.vp.w = const float w=128.0 (NOT a design-X coo", B_LIT },
   { 0x00A11330, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.vp.h = const float h=128.0 (NOT a design coord", B_LIT },
   { 0x00A11400, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.bg.w = const float w=128.0 (NOT a design-X coo", B_LIT },
