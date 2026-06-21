@@ -2989,7 +2989,14 @@ __declspec(naked) static void cc_box_x_stub(void)
         // so it is stretched by the companion cc_box_y_stub spliced at 0x004e9df2.
         jmp   dword ptr ds:[g_cc_box_x_resume]       // -> 0x004e9dd1
     chkbox:
-        // (2) class-info box element: rigid right-shift if design-X >= 300
+        // (2) class-info box element: rigid right-shift if design-X >= 300.
+        // GATED to char-create sub-page 0 (class-select) only. The appearance /
+        // dressing-room sub-pages (0x00A7223C != 0) draw the OK/Back, Character-Name
+        // and menu-cursor elements, which already land via their OWN .data source
+        // anchors (patch_dressingroom_layout, Trinity MOD_X_R). Shifting them here too
+        // double-moved them off-screen. Box striding is retained on the class-select page.
+        cmp   dword ptr ds:[0x00A7223C], 0           // char-create sub-page == 0 (class-select)?
+        jne   orig                                    // appearance/sub-pages -> ride own source
         movss xmm0, dword ptr [ebx]                  // element X
         comiss xmm0, dword ptr ds:[g_cc_box_x_thresh] // X >= 300 ?
         jb    orig                                    // design-X < 300 (left list) -> no shift
@@ -3284,51 +3291,27 @@ static int patch_streak_origin(void)
 }
 
 // ============================================================
-// Photon-streak scale fix — fix the title photon-blast streak
-// position at HudScale != 1.0.
-//
-// ROOT CAUSE: the streak emitter (0x006F82FA..0x006F832D) computes its viewport-
-// space spawn position as:
-// X_px = [0x96E27C] × [0xAF0358]   where [0xAF0358] == affine = 1920/design_w
-// Y_px = [0x96E278] × [0xAF035C]   where [0xAF035C] == affine (same value)
-// Stock values: [0x96E27C]=124.0, [0x96E278]=201.0 — calibrated for affine=2.25
-// (hs1.0). At hs2.0, affine=1.125, so X_px=139.5 and Y_px=226.1: the streak
-// collapses to the upper-left.
-//
-// FIX: write [0x96E27C] = 165.0*hs and [0x96E278] = 201.0*hs at ASI load so the
-// product constant*affine is invariant: (165*hs)*(1920/(853.333*hs)) = 371.25
-// and (201*hs)*(1920/(853.333*hs)) = 452.25 at ANY HudScale.
-// At hs2.0 these produce 330.0 / 402.0 — exactly Ephinea's patched values.
-//
-// Sig-guarded against the stock binary values (0x43490000=201.0, 0x42F80000=124.0).
-#define kStreakScaleYVA  0x0096E278u   // float: Y-scale factor (stock 201.0)
-#define kStreakScaleXVA  0x0096E27Cu   // float: X-scale factor (stock 124.0)
+// Photon-streak scale — match Ephinea exactly. Ephinea patches a SINGLE .data
+// float, [0x0096E27C] (the streak X-scale factor), 124.0 -> 165.0 (verified in the
+// stock-vs-Ephinea byte delta, eph_only). It leaves [0x0096E278]=201.0 and the
+// origin imms byte-stock. The streak's viewport position is scale*affine; writing
+// this one value keeps the title streak byte-identical to Ephinea, which does not
+// leak onto char-select. Static, unconditional (Ephinea patches it at all scales),
+// sig-guarded on the stock 124.0.
+#define kStreakScaleXVA  0x0096E27Cu   // float X-scale factor (stock 124.0 -> Ephinea 165.0)
 static int patch_streak_scale(void)
 {
     if (!g_cfg.patch_streak_scale) {
         log_line("[pso_widescreen] streak-scale: SKIP (PatchStreakScale=0)");
         return 1;
     }
-    float S = g_cfg.hud_scale;
-    if (!(S > 0.1f && S < 10.0f)) S = 1.0f;
-    // No-op at hs1.0: stock values already give the correct position (identity).
-    if (S <= 1.0f + 1e-4f) {
-        log_line("[pso_widescreen] streak-scale: SKIP (hs=1.0, stock values correct)");
-        return 1;
-    }
-    // Sig-check stock values before writing.
-    if (!sig_check(kStreakScaleYVA, 0x43490000u, "streak scale Y(=201.0)") ||
-        !sig_check(kStreakScaleXVA, 0x42F80000u, "streak scale X(=124.0)")) {
-        log_line("[pso_widescreen] streak-scale: SKIP (scale-constant sig mismatch)");
+    if (!sig_check(kStreakScaleXVA, 0x42F80000u, "streak scale X(=124.0)")) {
+        log_line("[pso_widescreen] streak-scale: SKIP (sig mismatch)");
         return 0;
     }
-    float cx = 165.0f * S;   // X: 165*hs → pixel X = cx * (1920/(853.333*hs)) = 371.25
-    float cy = 201.0f * S;   // Y: 201*hs → pixel Y = cy * (1920/(853.333*hs)) = 452.25
-    int ok = 1;
-    ok &= patch_write(kStreakScaleXVA, &cx, sizeof(cx), "streak scale X");
-    ok &= patch_write(kStreakScaleYVA, &cy, sizeof(cy), "streak scale Y");
-    log_line("[pso_widescreen] streak-scale: [0x96E27C]=%.2f [0x96E278]=%.2f (hs=%.2f, px~371/452)",
-             cx, cy, S);
+    float cx = 165.0f;   // Ephinea-exact (byte delta: [0x0096E27C] 124.0 -> 165.0)
+    int ok = patch_write(kStreakScaleXVA, &cx, sizeof(cx), "streak scale X");
+    log_line("[pso_widescreen] streak-scale: [0x0096E27C] = 165.0 (Ephinea-exact)");
     return ok;
 }
 
