@@ -60,8 +60,14 @@
 #include <string.h>
 #include <MinHook.h>          // MinHook detours (char-create composer hooks).
 #include "asset_registry.h"
-#include "anzz1_widescreen.h"
+#include "pso_widescreen.h"
 #include "ephinea_layout_table.h"   // Ephinea's EXACT front-end .data layout values (1:1)
+
+// The now-unused patch_* statics (their CALLS were removed when the unified
+// kBakes[] table took over; the function BODIES are deleted in a follow-up step)
+// trip MSVC C4505 (unreferenced local function). Suppress so the build stays
+// clean WITHOUT deleting the bodies yet.
+#pragma warning(disable:4505)
 // REFACTOR: sodaboy_tables.h retired — the entire Sodaboy LOOP/
 // Region coordinate bake was removed (anzz1 is the sole static coordinate
 // source of truth). No other TU consumes those tables.
@@ -5560,26 +5566,929 @@ static int apply_ephinea_layout(void)
     return n;
 }
 
+/* ============================================================================
+ *  UNIFIED kBakes[] TABLE + CORE
+ *  ----------------------------------------------------------------------------
+ *  ui_coord() is defined far above (~L2019); no forward decl needed.
+ *  apply_special() is defined just below apply_bakes() but called by it. */
+static void apply_special(const ws_scale_ctx *s);   /* fwd: apply_bakes calls it */
+
+static const bake_t kBakes[] = {
+/* ===== kBakes[] — 732 authoritative rows (anzz1 folded + patch_* extracted) ===== */
+/* fields: va, kind, base, coeff, offset, src, gate, stock, note, base2 */
+  /* ---- SRC_ANZZ1 : 566 rows ---- */
+  { 0x004011C0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x004011D2, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x004011DD, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x004011EF, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00407F9D, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00409F4B, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0040A016, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0040A02B, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0040A036, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0040A04B, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0040C445, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0040C469, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0040C48B, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00453809, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0045381D, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00453827, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0045383B, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00483278, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00489E53, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x004EB4AA, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x004EB4B4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x004EB4F0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x004EB4FA, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x004EC2D1, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x004EC2E9, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x004EF592, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x004EF59C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00502D7D, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00502D85, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x005BC90E, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x005BD783, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x005BDB89, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0066DFEF, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x0066DFFA, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x006F4922, K_SET, B_A, 0.5f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4936, K_SET, B_C, 0.5f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4CF2, K_SET, B_B, 0.5f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4CFA, K_SET, B_D, 0.4765625f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D02, K_SET, B_B, 2.5f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D0A, K_SET, B_D, 2.4765625f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D4E, K_SET, B_B, 2.5f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D56, K_SET, B_D, 0.4765625f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D5E, K_SET, B_B, 4.5f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D66, K_SET, B_D, 2.4765625f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x006F4D9F, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFCB8, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFCE0, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFCF4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFD12, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFD1C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFD58, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x006FFD76, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D2CE, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D2EC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D2F6, K_SET, B_A, 1.0f, -384.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x0070D30A, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D328, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D346, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D350, K_SET, B_A, 1.0f, -384.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x0070D364, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D382, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D3A0, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D3B4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D3D2, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D3F0, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x0070D404, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.movs", B_LIT },
+  { 0x007126A5, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x007126AC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x007165B8, K_SET, B_A, 1.0f, -16.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00719AB1, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00719ACE, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00719AD9, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00719AF6, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00719C08, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00719C16, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00719C5C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00719C6B, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00719C79, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00719C8A, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00719D44, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00719D53, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00719E84, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0071A21F, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0071A226, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0071A8F8, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0071A905, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0071A988, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0071A995, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00721E6C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00721E7A, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00721F2A, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x007403F6, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0074467D, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0074468D, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007446D8, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007446E8, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00744723, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00744733, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0074477E, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0074478E, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007583C8, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007583E3, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007583FE, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00758412, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007584EE, K_SET, B_A, 1.0f, 10.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x007584F5, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0075850F, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0075851F, K_SET, B_A, 1.0f, 10.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00758526, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0075853F, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00761CC7, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00761CCC, K_SET, B_A, 0.5f, -110.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00761CD9, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00761CDE, K_SET, B_A, 0.5f, -110.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00762367, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0076236C, K_SET, B_A, 0.5f, -180.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x007625F8, K_SET, B_A, 0.5f, -4.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00762602, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x007627CF, K_SET, B_A, 0.5f, -4.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x007627DF, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0077F2ED, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0077F30D, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0077F386, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0077F3A7, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0077F3B2, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0077F3D2, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00783A92, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00783AAA, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00785641, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00785648, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00785680, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x007856B1, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x007856B8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00785705, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00785BD2, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00785BD9, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00785C11, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00785C49, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x007888A6, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x007888C6, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x007888D1, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x007888F1, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00788EA6, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00788EC6, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00788ED1, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00788EF1, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00791C7A, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00792366, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00804EE0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00804EF4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x008051BA, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008051CE, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0082EC74, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0082ED43, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0082EF4C, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0082F018, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0082F700, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0082F7DB, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x008F8494, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F853C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F854C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F87D4, K_SET, B_A, 1.0f, -63.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x008F87D8, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x008F87E0, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x008F87E4, K_SET, B_A, 1.0f, -63.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x008F8EAC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F8EBC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F8F50, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9A94, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9A98, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x008F9AA4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9AC4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9AC8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x008F9D38, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9D68, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9E8C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9EF8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9F2C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9F34, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008F9F58, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008FA8A8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008FAE50, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008FAE90, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x008FFB80, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x008FFB84, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009006F4, K_U32, B_RW, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.w", B_LIT },
+  { 0x009006F8, K_U32, B_RH, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.h", B_LIT },
+  { 0x009006FC, K_U32, B_RW, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.w", B_LIT },
+  { 0x00900700, K_U32, B_RH, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.h", B_LIT },
+  { 0x00900704, K_U32, B_RW, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.w", B_LIT },
+  { 0x00900708, K_U32, B_RH, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.h", B_LIT },
+  { 0x0090070C, K_U32, B_RW, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.w", B_LIT },
+  { 0x00900710, K_U32, B_RH, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.h", B_LIT },
+  { 0x00900714, K_U32, B_RW, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.w", B_LIT },
+  { 0x00900718, K_U32, B_RH, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.h", B_LIT },
+  { 0x0090071C, K_U32, B_RW, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.w", B_LIT },
+  { 0x00900720, K_U32, B_RH, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "res.h", B_LIT },
+  { 0x009007B8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00901288, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x00909164, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00909168, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00909D70, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00909D84, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00909DA8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091D8B8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0091D8BC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091DA7C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0091DA80, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091E19C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091FBEC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0091FBF0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091FC50, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0091FC54, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091FC70, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0091FC74, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0091FF90, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0091FF94, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00920050, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00920104, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00920108, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00920160, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00920164, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0092B6EC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0092B71C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0092B740, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0092B780, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0096E534, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096E53C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096E54C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096E574, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096E5FC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096E660, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096F5D8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0096F5E0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0096F694, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0096F698, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0096FC44, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096FC54, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0096FE84, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0096FF5C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0096FF60, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0096FF9C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0096FFA8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0096FFBC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0096FFC0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009701EC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009701F0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097061C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00970638, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00970640, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00970648, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00970660, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097066C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009706C0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009706C8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009707F4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009707F8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00970808, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097080C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009710BC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009712DC, K_SET, B_C, -1.0f, 720.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00971F44, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F4C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F54, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F5C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F64, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F6C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F74, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F7C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F84, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F8C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F94, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971F9C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FA4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FAC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FBC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FC4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FCC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FD4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FDC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FE4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FEC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FF4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00971FFC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972000, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972004, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097200C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972010, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00972014, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972024, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972040, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972048, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972050, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00972054, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x00972058, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x0097205C, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x00972060, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x0097206C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972078, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00972094, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097209C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009720A4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009720A8, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x009720B0, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x009720B4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009720B8, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x009720CC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009720E0, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x009720E4, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x009720E8, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x009720EC, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x009720F0, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x009720F4, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x009720F8, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x009720FC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972100, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972104, K_ADD, B_C, 0.5f, -240.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.vcenter", B_LIT },
+  { 0x00972188, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972224, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097222C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972234, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097223C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972244, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097224C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972254, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097225C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972264, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097227C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972284, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009722DC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009722E4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009722EC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009722F4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009722FC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972304, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097230C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972314, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097231C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972324, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097232C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972334, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097233C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972344, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097234C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972354, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097235C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972364, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097236C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972374, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097237C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972384, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097238C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972394, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097239C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723A4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723AC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723B4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723BC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723C4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723CC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723D4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723DC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723E4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723EC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723F4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009723FC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972404, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097240C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972414, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097241C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972424, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097242C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972434, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097243C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972444, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097244C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972454, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097245C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972464, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097246C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972474, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097247C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972484, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097248C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972494, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097249C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724A4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724AC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724B4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724BC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724C4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724CC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724D4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724DC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724E4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724EC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724F4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009724FC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972504, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972508, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972518, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972530, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972540, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00972548, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972550, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972554, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097255C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972564, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097256C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972570, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972578, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972580, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x0097258C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972594, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097259C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725A4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725AC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725B4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725BC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725C4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725CC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725D0, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x009725D4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725E4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009725E8, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x009725EC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972610, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00972614, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x0097261C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00972620, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972698, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00972700, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00974E3C, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00974E40, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00974E44, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00974E48, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00978454, K_SET, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x00978458, K_SET, B_A, 1.0f, -860.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009796EC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009796F4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00979A28, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00979A34, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00979A70, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00979A7C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00979A8C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00979A9C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00979DC4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x00979DC8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00979DFC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00979E00, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097A16C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097A170, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097A1A8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097A1AC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097A1B8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097A1BC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097A6F0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097A6F4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097A73C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097A740, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097BB0C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097BB58, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097BBB0, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097E9A8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097E9D8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097E9E4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097E9F0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097EA00, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097EBB8, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097EBBC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097EC18, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097EC1C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0097EC48, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0097EC4C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0098A15C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0098A160, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0098A494, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0098A4A4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0098A4A8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0098A4B4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x0098A4B8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x0098A4DC, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x0098A500, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x009A3468, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009A3488, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009A3840, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3844, K_U32, B_D, 3.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3848, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A384C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3854, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3858, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A385C, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3860, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3868, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A386C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3870, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3874, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A387C, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3884, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3888, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3894, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3898, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A389C, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38AC, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38B0, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38B8, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38BC, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38C0, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38C4, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38CC, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38D4, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38D8, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A6900, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009A6908, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009A690C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009A6914, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009B8D0C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009B8D54, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009B8DC4, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009B8DDC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  { 0x009D0040, K_SET, B_A, 0.5f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009D0044, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009F0A80, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009F0A88, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009F0A90, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.delay", B_LIT },
+  { 0x009F0A98, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.delay", B_LIT },
+  { 0x009F0ADC, K_SET, B_A, 1.0f, -157.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009F0AF4, K_SET, B_A, 1.0f, -288.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009F0B0C, K_SET, B_A, 1.0f, -157.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009F0B24, K_SET, B_A, 1.0f, -288.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009F0B3C, K_SET, B_A, 1.0f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009F0B5C, K_SET, B_A, 1.0f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF080, K_SET, B_A, 1.0f, -144.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF084, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF098, K_SET, B_A, 1.0f, -144.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF09C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF0B0, K_SET, B_A, 1.0f, -16.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF0B4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF0C8, K_SET, B_A, 1.0f, -16.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF0CC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF0E0, K_SET, B_A, 1.0f, -272.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF0E4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF0F8, K_SET, B_A, 1.0f, -272.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF0FC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF110, K_SET, B_A, 1.0f, -143.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF114, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF128, K_SET, B_A, 1.0f, -143.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF12C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF1A8, K_SET, B_A, 1.0f, -144.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009FF1AC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x009FF50C, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
+  { 0x00A11324, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00A1133C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00A11390, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00A11398, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00A113A4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00A113AC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00A113E8, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  { 0x00A113F4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  { 0x00A33CD0, K_AR, B_AR, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "ar", B_LIT },
+  { 0x00A98498, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00A984B4, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00A984D0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00A984EC, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00A98508, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x00A98524, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  /* ---- SRC_EPHINEA : 81 rows ---- */
+  { 0x004137D0, K_SET, B_A, 0.5f, -21.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000000, "csel.footer.cancel.x (.text imm; stock299 + (A-640)/2)", B_LIT },
+  { 0x008F9F18, K_SET, B_A, 0.5f, -289.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x41F80000, "csel.banner.x (SELECT CHARACTER origin; stock31 + (A-6", B_LIT },
+  { 0x008FA024, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row0 (1.0->hud)", B_LIT },
+  { 0x008FA02C, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row1 (1.0->hud)", B_LIT },
+  { 0x008FA030, K_SET, B_A, 0.5f, 275.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4414C000, "csel.xhalf 595+half (=595+A/2-320)", B_LIT },
+  { 0x008FA034, K_SET, B_C, 0.5f, 1.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43710000, "csel.yhalfh 241+dh/2 (=241+C/2-240)", B_LIT },
+  { 0x008FA038, K_SET, B_A, 0.5f, 275.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4414C000, "csel.xhalf 595+half", B_LIT },
+  { 0x008FA03C, K_SET, B_C, 0.5f, 78.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x439F0000, "csel.yhalfh 318+dh/2 (=318+C/2-240)", B_LIT },
+  { 0x008FA044, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row2 (1.0->hud)", B_LIT },
+  { 0x008FA04C, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row3 (1.0->hud)", B_LIT },
+  { 0x008FA050, K_SET, B_A, 0.5f, 223.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4407C000, "csel.xhalf 543+half (=543+A/2-320)", B_LIT },
+  { 0x008FA054, K_SET, B_C, 0.5f, 1.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43710000, "csel.yhalfh 241+dh/2", B_LIT },
+  { 0x008FA058, K_SET, B_A, 0.5f, 223.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4407C000, "csel.xhalf 543+half", B_LIT },
+  { 0x008FA05C, K_SET, B_C, 0.5f, 78.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x439F0000, "csel.yhalfh 318+dh/2", B_LIT },
+  { 0x008FA064, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row4 (1.0->hud)", B_LIT },
+  { 0x008FA068, K_SET, B_KX, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.wmul.kx row0 (1.0->kx)", B_LIT },
+  { 0x008FA074, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row5 (1.0->hud)", B_LIT },
+  { 0x008FA078, K_SET, B_A, 0.5f, 275.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4414C000, "csel.xhalf 595+half", B_LIT },
+  { 0x008FA07C, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2 (=73+C/2-240)", B_LIT },
+  { 0x008FA080, K_SET, B_A, 0.5f, 295.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4419C000, "csel.xhalf 615+half (=615+A/2-320)", B_LIT },
+  { 0x008FA084, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA088, K_SET, B_A, 0.5f, 275.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4414C000, "csel.xhalf 595+half", B_LIT },
+  { 0x008FA08C, K_SET, B_C, 0.5f, 165.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43CA8000, "csel.yhalfh 405+dh/2 (=405+C/2-240)", B_LIT },
+  { 0x008FA094, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row6 (1.0->hud)", B_LIT },
+  { 0x008FA098, K_SET, B_KX, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.wmul.kx row1 (1.0->kx)", B_LIT },
+  { 0x008FA0A4, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row7 (1.0->hud)", B_LIT },
+  { 0x008FA0A8, K_SET, B_A, 0.5f, 223.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4407C000, "csel.xhalf 543+half", B_LIT },
+  { 0x008FA0AC, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA0B0, K_SET, B_A, 0.5f, 223.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4407C000, "csel.xhalf 543+half", B_LIT },
+  { 0x008FA0B4, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA0B8, K_SET, B_A, 0.5f, 223.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4407C000, "csel.xhalf 543+half", B_LIT },
+  { 0x008FA0BC, K_SET, B_C, 0.5f, 165.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43CA8000, "csel.yhalfh 405+dh/2", B_LIT },
+  { 0x008FA0C4, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row8 (1.0->hud)", B_LIT },
+  { 0x008FA0C8, K_SET, B_KX, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.wmul.kx row2 (1.0->kx)", B_LIT },
+  { 0x008FA0D4, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row9 (1.0->hud)", B_LIT },
+  { 0x008FA0D8, K_SET, B_A, 0.5f, 139.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43E58000, "csel.panel.center.x (stock459 + half)", B_LIT },
+  { 0x008FA0DC, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA0E0, K_SET, B_A, 0.5f, 166.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43F30000, "csel.panel.center.x (stock486 + half)", B_LIT },
+  { 0x008FA0E4, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA0E8, K_SET, B_A, 0.5f, 139.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43E58000, "csel.panel.center.x (stock459 + half)", B_LIT },
+  { 0x008FA0EC, K_SET, B_C, 0.5f, 165.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43CA8000, "csel.yhalfh 405+dh/2", B_LIT },
+  { 0x008FA0F4, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row10 (1.0->hud)", B_LIT },
+  { 0x008FA0F8, K_SET, B_KX, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.wmul.kx row3 (1.0->kx)", B_LIT },
+  { 0x008FA104, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row11 (1.0->hud)", B_LIT },
+  { 0x008FA108, K_SET, B_A, 0.5f, -289.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x41F80000, "csel.banner.x (stock31 + half)", B_LIT },
+  { 0x008FA10C, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA110, K_SET, B_A, 0.5f, -289.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x41F80000, "csel.banner.x (stock31 + half)", B_LIT },
+  { 0x008FA114, K_SET, B_C, 0.5f, -167.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42920000, "csel.yhalfh 73+dh/2", B_LIT },
+  { 0x008FA118, K_SET, B_A, 0.5f, -289.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x41F80000, "csel.banner.x (stock31 + half)", B_LIT },
+  { 0x008FA11C, K_SET, B_C, 0.5f, 165.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43CA8000, "csel.yhalfh 405+dh/2", B_LIT },
+  { 0x008FA124, K_SET, B_KX, 410.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43CD0000, "csel.xkx 410*kx", B_LIT },
+  { 0x008FA128, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row12 (1.0->hud)", B_LIT },
+  { 0x008FA12C, K_SET, B_KX, 214.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43560000, "csel.xkx 214*kx", B_LIT },
+  { 0x008FA130, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row13 (1.0->hud)", B_LIT },
+  { 0x008FA138, K_SET, B_C, 1.0f, -24.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43E40000, "csel.ydh 456+dh (=456+C-480)", B_LIT },
+  { 0x008FA13C, K_SET, B_KX, 426.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D50000, "csel.xkx 426*kx", B_LIT },
+  { 0x008FA140, K_SET, B_C, 1.0f, -55.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D48000, "csel.ydh 425+dh (=425+C-480)", B_LIT },
+  { 0x008FA144, K_SET, B_KX, 213.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43550000, "csel.xkx 213*kx", B_LIT },
+  { 0x008FA148, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row14 (1.0->hud)", B_LIT },
+  { 0x008FA14C, K_SET, B_KX, 411.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43CD8000, "csel.xkx 411*kx", B_LIT },
+  { 0x008FA150, K_SET, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x3F800000, "csel.hmul row15 (1.0->hud)", B_LIT },
+  { 0x008FA15C, K_SET, B_KX, 229.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43650000, "csel.xkx 229*kx", B_LIT },
+  { 0x008FA1A4, K_SET, B_KX, 15.6f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x4179999A, "csel.xkx 15.6*kx", B_LIT },
+  { 0x008FA1AC, K_SET, B_C, 0.5f, -168.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42900000, "csel.yhay (72+dh/2)*affine_y — want=(72+(C-480)/2)*aff", B_AFFINEY },
+  { 0x008FA1C0, K_SET, B_KX, 462.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43E70000, "csel.xkxay 462*kx*affine_y — TWO runtime bases; want=4", B_AFFINEY },
+  { 0x008FA1C4, K_SET, B_AFFINEY, 50.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42480000, "csel.ay 50*affine_y", B_LIT },
+  { 0x008FA1CC, K_SET, B_AFFINEY, 40.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42200000, "csel.ay 40*affine_y", B_LIT },
+  { 0x008FA1D0, K_SET, B_C, 0.5f, -141.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42C60000, "csel.yhay (99+dh/2)*affine_y — want=(99+(C-480)/2)*aff", B_AFFINEY },
+  { 0x008FA1D4, K_SET, B_AFFINEY, 16.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x41800000, "csel.ay 16*affine_y", B_LIT },
+  { 0x008FA1D8, K_SET, B_A, 0.5f, 235.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x440AC000, "csel.xhay (555+half)*affine_y — want=(555+(A-640)/2)*a", B_AFFINEY },
+  { 0x008FA528, K_SET, B_A, 1.0f, -214.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D50000, "csel.fgright.questslider.x (stock426 + (A-640)); hs1.0", B_LIT },
+  { 0x008FA52C, K_SET, B_C, 0.5f, 10.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x437A0000, "csel.details.pane.y 250+(C-480)/2 (=250+C/2-240) MOD_Y", B_LIT },
+  { 0x008FABF8, K_SET, B_A, 1.0f, -208.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D80000, "csel.fgright.dressroom-confirm.x (stock432 + (A-640));", B_LIT },
+  { 0x008FAC00, K_SET, B_A, 1.0f, -212.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D60000, "csel.fgright.sibling.x (stock428 + (A-640)); hs1.0 dR=", B_LIT },
+  { 0x008FAC08, K_SET, B_A, 1.0f, -212.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D60000, "csel.fgright.recreate-confirm.x (stock428 + (A-640)); ", B_LIT },
+  { 0x008FADC8, K_SET, B_A, 0.5f, -256.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42800000, "csel.banner.x (stock64 + half)", B_LIT },
+  { 0x0091D988, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44178000, "dr.toprow.ok_back.x  WRITTEN VALUE = stock(606.0)+ (s-", B_LIT },
+  { 0x0091DC74, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44170000, "dr.charname.field.x  WRITTEN VALUE = stock(604.0)+ (s-", B_LIT },
+  { 0x0091DD1C, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44198000, "dr.botrow.ok_back.x  WRITTEN VALUE = stock(614.0)+ (s-", B_LIT },
+  { 0x0096E27C, K_SET, B_LIT, 165.0f, 0.0f, SRC_EPHINEA, GATE_STREAK_SCALE, 0x42F80000, "streak.scale.x (Ephinea byte-delta 124.0->165.0, the [", B_LIT },
+  { 0x00972148, K_SET, B_A, 0.5f, -233.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42AE0000, "csel.banner.x (stock87 + half)", B_LIT },
+  /* ---- SRC_TRINITY : 58 rows ---- */
+  { 0x004013A7, K_SET, B_A, 1.0f, -1.0f, SRC_TRINITY, GATE_CHARSELECT, 0x441FC000, "csel.backdrop.w (far-corner X; MOD_X_R; 639->design_w-", B_LIT },
+  { 0x004013AF, K_SET, B_C, 1.0f, -1.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43EF8000, "csel.backdrop.h (far-corner Y; MOD_Y_B; 479->design_h-", B_LIT },
+  { 0x00403114, K_SET, B_C, 1.0f, -130.0f, SRC_TRINITY, GATE_ALWAYS, 0x43AF0000, "fe.login.connstr.y MOD_Y_B (stock 350)", B_LIT },
+  { 0x0041061C, K_SET, B_A, 0.5f, 112.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43D80000, "csel.tabkey.detailson.x (.text imm; stock432 + half)", B_LIT },
+  { 0x00410628, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.tab.details_on.y MOD_Y_B (stock 421)", B_LIT },
+  { 0x0041066B, K_SET, B_A, 0.5f, 112.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43D80000, "csel.tabkey.detailsoff.x (.text imm; stock432 + half)", B_LIT },
+  { 0x00410672, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.tab.details_off.y MOD_Y_B (stock 421)", B_LIT },
+  { 0x004137C2, K_SET, B_A, 0.5f, -164.0f, SRC_TRINITY, GATE_CHARSELECT, 0x431C0000, "csel.footer.enter.x (.text imm; stock156 + (A-640)/2);", B_LIT },
+  { 0x004137C9, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.enterkey.y MOD_Y_B (stock 421)", B_LIT },
+  { 0x004137D7, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.esckey.y MOD_Y_B (stock 421)", B_LIT },
+  { 0x004137DE, K_SET, B_A, 0.5f, 112.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43D80000, "csel.footer.details.x (.text imm orphan; stock432 + (A", B_LIT },
+  { 0x004EC0BE, K_SET, B_C, 1.0f, 12.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F60000, "dr.honeycomb.bottom.y MOD_Y_B (stock 492)", B_LIT },
+  { 0x004ED0BF, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.leftgrad.botL.y MOD_Y_B (stock 600)", B_LIT },
+  { 0x004ED0D3, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.leftgrad.botR.y MOD_Y_B (stock 600)", B_LIT },
+  { 0x004ED144, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.rightgrad.botL.y MOD_Y_B (stock 600)", B_LIT },
+  { 0x004ED14E, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.rightgrad.botR.y MOD_Y_B (stock 600)", B_LIT },
+  { 0x0070D422, K_SET, B_C, 1.0f, -220.0f, SRC_TRINITY, GATE_ALWAYS, 0x43820000, "patch.curstatus.bar.y MOD_Y_B (stock 260)", B_LIT },
+  { 0x0070D47C, K_SET, B_C, 1.0f, -116.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B60000, "patch.allstatus.bar.y MOD_Y_B (stock 364)", B_LIT },
+  { 0x0070D4D6, K_SET, B_C, 1.0f, -250.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43660000, "patch.current-status.title.y (MOD_Y_B: C-(480-230)); .", B_LIT },
+  { 0x0070D4E0, K_SET, B_C, 1.0f, -200.0f, SRC_TRINITY, GATE_CHARSELECT, 0x438C0000, "patch.current-status.progress.y (MOD_Y_B: C-(480-280))", B_LIT },
+  { 0x0070D4F4, K_SET, B_C, 1.0f, -146.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43A70000, "patch.all-status.title.y (MOD_Y_B: C-(480-334)); .text", B_LIT },
+  { 0x0070D508, K_SET, B_C, 1.0f, -96.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43C00000, "patch.all-status.progress.y (MOD_Y_B: C-(480-384)); .t", B_LIT },
+  { 0x00790AF5, K_SET, B_A, 0.5f, -160.0f, SRC_TRINITY, GATE_ALWAYS, 0x43200000, "cfg.kbd_overwrite_custom_settings.x (.text MOD_X_C)", B_LIT },
+  { 0x00799ECA, K_SET, B_A, 0.5f, -140.0f, SRC_TRINITY, GATE_ALWAYS, 0x43340000, "cfg.leave_team_confirm.x (.text MOD_X_C)", B_LIT },
+  { 0x008F9E80, K_SET, B_C, 1.0f, -110.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B90000, "csel.pleaseselect.y MOD_Y_B (stock 370)", B_LIT },
+  { 0x0091DAE8, K_SET, B_C, 1.0f, 91.5f, SRC_TRINITY, GATE_ALWAYS, 0x440EE000, "dr.transition.honeycomb.y MOD_Y_B (stock 571.5)", B_LIT },
+  { 0x0091DC70, K_SET, B_C, 1.0f, -84.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C60000, "dr.charname.field.y MOD_Y_B (stock 396)", B_LIT },
+  { 0x0091DC84, K_SET, B_C, 1.0f, -84.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C60000, "dr.inputname.field.y MOD_Y_B (stock 396)", B_LIT },
+  { 0x0091DD20, K_SET, B_C, 1.0f, -46.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D90000, "dr.bottom.okback.y MOD_Y_B (stock 434)", B_LIT },
+  { 0x0091E194, K_SET, B_C, 1.0f, -64.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D00000, "dr.grayline.y MOD_Y_B (stock 416)", B_LIT },
+  { 0x0096E52C, K_SET, B_A, 1.0f, 40.0f, SRC_TRINITY, GATE_ALWAYS, 0x442A0000, "fe.fixedchat.next.x MOD_X_R +right (stock 680)", B_LIT },
+  { 0x0096FFFC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "fe.f1help.x MOD_X_C +half", B_LIT },
+  { 0x00970FF0, K_SET, B_C, 1.0f, -550.0f, SRC_TRINITY, GATE_ALWAYS, 0xC28C0000, "fe.ime.id.y MOD_Y_B (stock -70)", B_LIT },
+  { 0x00971350, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.party_mode_submenu.x (MOD_X_C)", B_LIT },
+  { 0x00971358, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.difficulty_submenu.x (MOD_X_C)", B_LIT },
+  { 0x00972070, K_SET, B_A, 0.5f, -188.0f, SRC_TRINITY, GATE_ALWAYS, 0x43040000, "ig.battle_result.x (MOD_X_C)", B_LIT },
+  { 0x00972128, K_SET, B_A, 1.0f, -252.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C20000, "ig.cmode_records.x (MOD_X_R)", B_LIT },
+  { 0x00972138, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_ALWAYS, 0x43870000, "ig.cmode_area_number_popup.x (MOD_X_C)", B_LIT },
+  { 0x009721E0, K_SET, B_A, 0.5f, -169.0f, SRC_TRINITY, GATE_ALWAYS, 0x43170000, "ig.in_battle_description.x (MOD_X_C)", B_LIT },
+  { 0x009721F8, K_SET, B_A, 0.5f, -32.0f, SRC_TRINITY, GATE_ALWAYS, 0x43900000, "ig.cmode_reward_dialog.x (MOD_X_C)", B_LIT },
+  { 0x00972200, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.cmode_srank_name_dialog.x (MOD_X_C)", B_LIT },
+  { 0x00972208, K_SET, B_A, 0.5f, 39.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B38000, "ig.cmode_reward_dialog_submenu.x (MOD_X_C)", B_LIT },
+  { 0x00972510, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43870000, "lobby.soccer.score.x (MOD_X_C: stock270 + (A-640)/2)", B_LIT },
+  { 0x00972538, K_SET, B_A, 0.5f, -139.0f, SRC_TRINITY, GATE_ALWAYS, 0x43350000, "ig.info_counter_create_party.x (MOD_X_C)", B_LIT },
+  { 0x00972568, K_SET, B_A, 1.0f, -245.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C58000, "ig.battle_disconnect_dlg.x (MOD_X_R)", B_LIT },
+  { 0x009725D8, K_SET, B_A, 0.5f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43828000, "ig.cmode_srank_name_caret.x (MOD_X_C)", B_LIT },
+  { 0x009725F0, K_SET, B_A, 0.5f, -279.0f, SRC_TRINITY, GATE_CHARSELECT, 0x42240000, "shipsel.login-error.x (MOD_X_C: stock41 + (A-640)/2)", B_LIT },
+  { 0x009725F4, K_SET, B_C, 0.5f, -112.0f, SRC_TRINITY, GATE_ALWAYS, 0x43000000, "shipselect.loginerror.y MOD_Y_C +half (stock 128)", B_LIT },
+  { 0x009725F8, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.join_room_password_request.x (MOD_X_C)", B_LIT },
+  { 0x00972600, K_SET, B_A, 0.5f, -211.0f, SRC_TRINITY, GATE_ALWAYS, 0x42DA0000, "ig.join_room_password_caret.x (MOD_X_C)", B_LIT },
+  { 0x00972638, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_name_field.x (MOD_X_C)", B_LIT },
+  { 0x00972640, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_password_field.x (MOD_X_C)", B_LIT },
+  { 0x00972688, K_SET, B_A, 0.5f, -289.0f, SRC_TRINITY, GATE_ALWAYS, 0x41F80000, "ig.team_invitation_explanation.x (MOD_X_C)", B_LIT },
+  { 0x00979BCC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_texture.x (MOD_X_C; offset 0)", B_LIT },
+  { 0x0097E458, K_SET, B_C, 1.0f, -90.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C30000, "fe.login.botright.y MOD_Y_B (stock 390)", B_LIT },
+  { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_TRINITY, GATE_ALWAYS, 0x44084000, "fe.login.botright.x MOD_X_R +right (stock 545)", B_LIT },
+  { 0x009F24E4, K_SET, B_A, 0.5f, 168.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F40000, "ig.team_invitation_explanation_submenu.x (MOD_X_C)", B_LIT },
+  { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_bg_texture.x (MOD_X_C; offset 0)", B_LIT },
+  /* ---- SRC_OURS : 27 rows ---- */
+  { 0x004EC0AF, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x44230000, "dr.honeycomb.enter_exit.right_edge  WRITTEN VALUE = st", B_LIT },
+  { 0x004EC951, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x442A0000, "dr.honeycomb.transition.right_edge  WRITTEN VALUE = st", B_LIT },
+  { 0x006F49FD, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.outer.mag (code imm32 of `push 430.0`; ONE-S", B_LIT },
+  { 0x006F4A57, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.inner.mag (code imm32 of `push 178.0`; ONE-S", B_LIT },
+  { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "bb.line.cleanup.1; NOP 5 bytes over CALL 0x0082b558 (t", B_LIT },
+  { 0x00719FD4, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x11157FE8, "bb.line.cleanup.2; NOP 5 bytes over CALL 0x0082b558 (t", B_LIT },
+  { 0x00721FC0, K_SET, B_A, 1.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x44200000, "lobby.nnbar.rightEdgeX (= dw; 640 4:3-ceiling raised t", B_LIT },
+  { 0x007583C1, K_SET, B_A, 1.0f, 10.0f, SRC_OURS, GATE_ALWAYS, 0x44228000, "login.menu.primaryX1 (a_plus_10 = dw+10)", B_LIT },
+  { 0x007583F3, K_SET, B_A, 1.0f, 10.0f, SRC_OURS, GATE_ALWAYS, 0x44228000, "login.menu.secondaryX2 (a_plus_10 = dw+10)", B_LIT },
+  { 0x0075840B, K_SET, B_A, 1.0f, 10.0f, SRC_OURS, GATE_ALWAYS, 0x44228000, "login.menu.animTarget (a_plus_10 = dw+10)", B_LIT },
+  { 0x0096E114, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.size (live read*hud_scale, ONE-SHOT; no fixed", B_LIT },
+  { 0x0096E168, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[0] (table -137,-79,137,-79,0,156; this fl", B_LIT },
+  { 0x0096E16C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[1] (stock -79; ONE-SHOT live*hud_scale)", B_LIT },
+  { 0x0096E170, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[2] (stock 137; ONE-SHOT live*hud_scale)", B_LIT },
+  { 0x0096E174, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[3] (stock -79; ONE-SHOT live*hud_scale)", B_LIT },
+  { 0x0096E178, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[4] (stock 0; ONE-SHOT live*hud_scale)", B_LIT },
+  { 0x0096E17C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[5] (stock 156; ONE-SHOT live*hud_scale)", B_LIT },
+  { 0x009A3420, K_SET, B_A, 0.0f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e0.x1; stock 0.0 * stretch. stretch=4/3 @hs1.0 ", B_LIT },
+  { 0x009A3428, K_SET, B_A, 0.4984375f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e0.x2; stock 319.0 * stretch. At hs!=1.0 = 319*", B_LIT },
+  { 0x009A3440, K_SET, B_A, 0.0f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e1.x1; stock 0.0 * stretch -> 0. No sig-guard. ", B_LIT },
+  { 0x009A3448, K_SET, B_A, 0.4984375f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e1.x2; stock 319.0 * stretch = 319*A/640 @hs!=1", B_LIT },
+  { 0x009A3460, K_SET, B_A, 0.5f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e2.x1; stock 320.0 * stretch = 320*A/640 @hs!=1", B_LIT },
+  { 0x009A3480, K_SET, B_A, 0.5f, 0.0f, SRC_OURS, GATE_SPLASH, 0x00000000, "splash.e3.x1; stock 320.0 * stretch = 320*A/640 @hs!=1", B_LIT },
+  { 0x00A1132C, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.vp.w = const float w=128.0 (NOT a design-X coo", B_LIT },
+  { 0x00A11330, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.vp.h = const float h=128.0 (NOT a design coord", B_LIT },
+  { 0x00A11400, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.bg.w = const float w=128.0 (NOT a design-X coo", B_LIT },
+  { 0x00A11404, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.bg.h = const float h=128.0 (NOT a design coord", B_LIT },
+};
+
+
+/* ============================================================================
+ * RECODE CORE (staging) — resolve_base / gate_on / apply_bakes.
+ * Folds into pso_widescreen.c after kBakes[]. Assumes: g_cfg (config struct),
+ * ws_scale_ctx, log_line, kBakes[]. No <math.h> (B_BCEIL uses anzz1's +0.9999
+ * integer ceil, matching its Bi).
+ * ========================================================================== */
+
+#define ARRAYLEN(a) (sizeof(a) / sizeof((a)[0]))
+
+static uint32_t f32_bits(float v) { uint32_t u; memcpy(&u, &v, 4); return u; }
+
+/* resolve a row's value base from the live scale ctx.
+   At 4:3 (hud_scale derives A=640, C=480, B=128, D=128, AR=4/3) every base
+   returns its stock-equivalent, so coeff*base+offset == the stock value and the
+   value-guard turns the write into a no-op — the whole table is 4:3-identical. */
+static float resolve_base(uint8_t base, const ws_scale_ctx *s)
+{
+    switch (base) {
+        case B_A:        return s->A;
+        case B_C:        return s->C;
+        case B_B:        return s->B;
+        case B_BCEIL:    return (float)(DWORD)(s->B + 0.9999f);  /* == anzz1 Bi */
+        case B_D:        return (float)s->D;
+        case B_AR:       return s->game_aspect;
+        case B_RW:       return (float)s->render_w;
+        case B_RH:       return (float)s->render_h;
+        case B_HUDSCALE: return s->hud_scale;
+        case B_KX:       return s->hud_scale * ((16.0f / 9.0f) / (4.0f / 3.0f));
+        case B_AFFINEY:  return (s->render_h > 0) ? ((float)s->render_h / 480.0f) : 1.0f;
+        case B_ANATIVE:  return (s->hud_scale > 0.01f) ? (s->A / s->hud_scale) : s->A;
+        case B_CNATIVE:  return (s->hud_scale > 0.01f) ? (s->C / s->hud_scale) : s->C;
+        case B_LIT:
+        default:         return 1.0f;
+    }
+}
+
+/* a row's gate bit maps to one cfg toggle; GATE_ALWAYS is unconditional. */
+static int gate_on(uint8_t gate)
+{
+    switch (gate) {
+        case GATE_ALWAYS:       return 1;
+        case GATE_CHARSELECT:   return g_cfg.patch_charselect;
+        case GATE_MINIMAP:      return g_cfg.patch_minimap;
+        case GATE_RUNE:         return g_cfg.patch_rune_scale;
+        case GATE_STREAK_SCALE: return g_cfg.patch_streak_scale;
+        case GATE_HANGAME:      return g_cfg.patch_hangame_title_menu;
+        case GATE_SPLASH:       return g_cfg.patch_splash_phase2;
+        default:                return 1;
+    }
+}
+
+/* ADD/MUL rows are RMW and would double on re-run; we snapshot each one's stock
+   on the FIRST apply, so the written value is the absolute stock+delta / stock*f.
+   That makes the WHOLE table idempotent and lets the overwrite-guard re-run it. */
+static float   g_stock_cache[ARRAYLEN(kBakes)];
+static uint8_t g_stock_valid[ARRAYLEN(kBakes)];
+
+/* apply_bakes — the ONE value-guarded pass over kBakes[]. Safe to re-run. */
+static void apply_bakes(const ws_scale_ctx *s)
+{
+    int n_set = 0, n_delta = 0, n_skip = 0, n_guard = 0;
+    for (size_t i = 0; i < ARRAYLEN(kBakes); i++) {
+        const bake_t *b = &kBakes[i];
+        if (!gate_on(b->gate)) continue;
+
+        __try {
+            float expr = (b->coeff * resolve_base(b->base, s) + b->offset)
+                       * resolve_base(b->base2, s);   /* base2 == B_LIT (1.0) for most rows */
+            uint32_t want;
+
+            if (b->kind == K_NOP) {
+                want = 0;  /* sentinel; handled below */
+            } else if (b->kind == K_U32) {
+                want = (uint32_t)expr;
+            } else if (b->kind == K_ADD || b->kind == K_MUL) {
+                if (!g_stock_valid[i]) {
+                    /* first sight: optional sig-guard, then snapshot stock */
+                    uint32_t live = *(volatile uint32_t *)(uintptr_t)b->va;
+                    if (b->stock && live != b->stock) { n_guard++; continue; }
+                    memcpy(&g_stock_cache[i], &live, 4);
+                    g_stock_valid[i] = 1;
+                }
+                float stock = g_stock_cache[i];
+                float v = (b->kind == K_ADD) ? (stock + expr) : (stock * expr);
+                want = f32_bits(v);
+            } else { /* K_SET / K_AR */
+                want = f32_bits(expr);
+            }
+
+            uint32_t live = *(volatile uint32_t *)(uintptr_t)b->va;
+            if (b->kind != K_NOP && live == want) { n_skip++; continue; }  /* idempotent */
+            /* SET-class sig-guard: refuse a foreign site (neither stock nor ours) */
+            if (b->stock && (b->kind == K_SET || b->kind == K_U32) &&
+                live != b->stock && live != want) { n_guard++; continue; }
+
+            DWORD old, tmp;
+            size_t len = (b->kind == K_NOP) ? 5 : 4;
+            if (!VirtualProtect((LPVOID)(uintptr_t)b->va, len, PAGE_EXECUTE_READWRITE, &old)) continue;
+            if (b->kind == K_NOP) memset((void *)(uintptr_t)b->va, 0x90, 5);
+            else                  *(volatile uint32_t *)(uintptr_t)b->va = want;
+            VirtualProtect((LPVOID)(uintptr_t)b->va, len, old, &tmp);
+            if (b->va < 0x008F8000u)  /* .text => flush icache (anzz1's split) */
+                FlushInstructionCache(GetCurrentProcess(), (LPCVOID)(uintptr_t)b->va, len);
+
+            if (b->kind == K_ADD || b->kind == K_MUL) n_delta++; else n_set++;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    log_line("[ws] apply_bakes: %d set, %d delta, %d skip, %d guard (of %d rows)",
+             n_set, n_delta, n_skip, n_guard, (int)ARRAYLEN(kBakes));
+    apply_special(s);
+}
+
+/* sp_write_f32 — value-guarded float write (the apply_special companion). */
+static void sp_write_f32(uint32_t va, float v)
+{
+    DWORD old, tmp;
+    __try {
+        if (*(volatile uint32_t *)(uintptr_t)va == f32_bits(v)) return;
+        if (!VirtualProtect((LPVOID)(uintptr_t)va, 4, PAGE_EXECUTE_READWRITE, &old)) return;
+        *(volatile float *)(uintptr_t)va = v;
+        VirtualProtect((LPVOID)(uintptr_t)va, 4, old, &tmp);
+        if (va < 0x008F8000u)
+            FlushInstructionCache(GetCurrentProcess(), (LPCVOID)(uintptr_t)va, 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+
+/* apply_special — the 9 rows that aren't (coeff*base+offset)*base2: they read
+   live cfg (minimap), a runtime ratio (in-game affine), or branch on aspect
+   (hangame). Called at the tail of apply_bakes. NOTE: verify the hangame and
+   FVPRESET formulas against patch_hangame_title_menu_layout / apply_startup_bakes
+   when folding (placeholder uses the documented widescreen forms). */
+static void apply_special(const ws_scale_ctx *s)
+{
+    /* minimap (ours): positions = ui_coord(cfg coord); zoom = raw cfg literal. */
+    if (g_cfg.patch_minimap) {
+        sp_write_f32(0x00A113E8, ui_coord(g_cfg.minimap_bg_x));
+        sp_write_f32(0x00A113EC, ui_coord(g_cfg.minimap_bg_y));
+        sp_write_f32(0x00A11324, ui_coord(g_cfg.minimap_vp_x));
+        sp_write_f32(0x00A11328, ui_coord(g_cfg.minimap_vp_y));
+        sp_write_f32(0x00804A5D, g_cfg.minimap_zoom);   /* .text imm; not scaled */
+    }
+    /* in-game 2D affine preset (F_VPRESET) = render_w / design_w; design_w == s->A
+       (set by the kBakes design_w row that ran just before us). */
+    if (s->A > 1.0f) {
+        float ig_aff = (float)s->render_w / s->A;
+        sp_write_f32(0x0082F8F4, ig_aff);
+        sp_write_f32(0x0082F914, ig_aff);
+    }
+    /* hangame title menu (Login/Start Game/...): widescreen places it from the
+       wide extents; the 4:3 fallback never fires here (apply_* only run enabled). */
+    if (g_cfg.patch_hangame_title_menu) {
+        if (s->A > 640.0f) {
+            sp_write_f32(0x00974E08, s->A * 0.5f - 110.0f);
+            sp_write_f32(0x00974E0C, s->C - 140.0f);
+        } else {
+            sp_write_f32(0x00974E08, ui_coord(g_cfg.hangame_menu_x));
+            sp_write_f32(0x00974E0C, ui_coord(g_cfg.hangame_menu_y));
+        }
+    }
+}
+
+
 static void apply_static_patches(const ws_scale_ctx *s)
 {
-    // (1) anzz1 coordinate bake — THE static coordinate source of truth.
-    log_line("[pso_widescreen] apply_static_patches: anzz1 bake (authoritative coords)");
-    apply_anzz1_widescreen(s->game_aspect, s->A, s->B, s->C,
-                           (unsigned long)s->D, s->render_w, s->render_h);
-
-    // (1a') char-select 1.0-PIN restore-target capture REMOVED with the
-    // pin. Char-select scales with HudScale (Ephinea-style); anzz1's hud-scaled
-    // design divisors (design_w 0x0098A4B8 = 853.333*S, design_h = 480*S) stand
-    // as-is and the stock W1 derives affine 2.25/S from them — no snapshot needed.
-
-    // (1b) front-end startup source bakes — MUST run IMMEDIATELY AFTER the anzz1
-    // bake (anzz1 owns design_w 0x0098A4B8). ONE linear pass of value-guarded
-    // source-immediate rewrites (char-create right pane + Scene-02 login seeds);
-    // 4:3 no-op by construction. See apply_startup_bakes /
-    // render_w feeds the F_VPRESET in-game affine bake (ig_aff = render_w/design_w).
+    // (1) front-end startup source bakes — the char-create description-TEXT
+    // bake (not a flat write). Runs FIRST; apply_bakes overwrites any overlap.
     apply_startup_bakes(s->render_w);
 
-    // (1c) char-create hex-backdrop 16:9 fill — install the tail-splice on
+    // (2) THE unified table — authoritative coordinate source of truth (folds
+    // anzz1's 6 lists + the ~20 patch_* flat-write helpers). Value-guarded,
+    // 4:3-identity by construction; calls apply_special() internally.
+    apply_bakes(s);
+
+    // (3) char-create hex-backdrop 16:9 fill — install the tail-splice on
     // RenderChallengePanelBackground_004ed008 that emits extra static
     // background-tile column(s) at design X=640.. until the columns cover
     // design_w. NOT a per-frame composer poke: it drives the engine's own
@@ -5614,63 +6523,11 @@ static void apply_static_patches(const ws_scale_ctx *s)
         log_line("[pso_widescreen] cc-backdrop hex-fill: SKIP (PatchCharSelect=0)");
     }
 
-    // (2) minimap — MUST run AFTER the anzz1 bake (it bakes ON TOP of anzz1's
-    // 0xA11324 / 0xA113E8 right-align placement).
-    patch_minimap_layout();
+    // (4) psobb.io patch-server news/status screen (Trinity AdDrawLineTask
+    // @0x00408C9D): right/bottom-anchor the MOTD box geometry. This stays a
+    // CALL/code patch (not a flat .data write), so it is NOT in kBakes[].
+    patch_ad_draw_line(s);
 
-    // (3) engine-independent static companions (order-independent among
-    // themselves; rune-scale is the SOLE owner of the seal immediates).
-    apply_bb_line_cleanup();            // thin cyan-line NOPs (sig-guarded)
-    apply_splash_phase2();              // D3: SEGA splash widen (de-conflicted)
-    if (g_cfg.patch_hangame_title_menu) {
-        patch_hangame_title_menu_layout(s);
-    } else {
-        log_line("[pso_widescreen] hangame-title-menu: SKIP (PatchHangameTitleMenu=0)");
-    }
-    patch_flare_scale_descriptor();     // opt-in (default OFF); sig-guarded 4.0
-    patch_rune_scale();                 // rune emblem + the 2 title-RUNE-SEAL
-                                        // immediates 0x006F49FD/0x006F4A57
-                                        // (NOT the title plate/logo group); now
-                                        // one-shot-guarded (MAJOR-1).
-    patch_streak_origin();              // title photon-streak origin (sig 0.0)
-    patch_streak_scale();               // title photon-streak position scale fix (2026-06-18)
-    patch_charselect_layout(s);         // char-select 16:9 2D layout
-    patch_charselect_banner_center(s);  // SELECT CHARACTER banner + panel center
-                                        // anchors (anzz1-uncovered; +(A-640)/2)
-    patch_charselect_vertical(s);       // FULL char-select layout table 0x008FA000..1E0
-                                        // (Ephinea-exact): Y-scale/Y-pos to design_h
-                                        // (VERTICAL-STUCK fix) + backdrop X +half
-                                        // (PHOTON-BLAST LEAK fix). Idempotent, 4:3 no-op.
-    patch_charselect_details_pane_y(s); // DETAILS pane ("Type:/ID:/Time:") Y 0x8FA52C
-                                        // dropped down (MOD_Y_C/B switchable). 4:3 no-op.
-    patch_charselect_backdrop(s);       // char-select-ONLY animated-background quad
-                                        // (`f256_backtext` @0x0040131c->RenderUIQuad):
-                                        // extend the 2 globally-unique far-corner
-                                        // immediates 639.0f@0x004013A7 / 479.0f@0x004013AF
-                                        // to (design_w-1, design_h-1) so the (0,0)-origin
-                                        // backdrop FILLS the 16:9 canvas (was 74.9%).
-                                        // Idempotent, 4:3/disabled no-op. Char-select-
-                                        // exclusive: title/lobby/in-game/char-create draw
-                                        // through different paths, untouched.
-    // TRINITY-GAP BAKES — elements Ephinea+Trinity widescreen but we
-    // MISSED. All value-guarded on EXACT live stock bits, unique/correctly-scoped,
-    // 4:3 byte-identical no-op, gated on the front-end PatchCharSelect master flag.
-    // Skips 0x0096F2B8 (per-frame RMW patch-bar width — address-unsafe).
-    patch_dressingroom_layout(s);       // DR honeycomb/field/row X (6 * MOD_X_R)
-    patch_lobby_extras(s);              // soccer score + ship-select login-error (2 * MOD_X_C)
-    patch_frontend_misc(s);             // F1 Help (MOD_X_C) + login tex + fixed-chat NEXT (MOD_X_R)
-    patch_ingame_menu_table(s);         // in-game menu dispatch table (2*MOD_X_R + 18*MOD_X_C)
-    patch_config_menus(s);              // kbd overwrite-custom + leave-team confirm (2 * MOD_X_C)
-    patch_ad_draw_line(s);              // psobb.io patch-server news/status screen
-                                        // (Trinity AdDrawLineTask @0x00408C9D): right/
-                                        // bottom-anchor the MOTD box geometry. Was MISSING.
-    patch_patch_status_screen(s);       // Current/All Status title+progress Y .text imms
-                                        // (Trinity hudElements 0x0070D4D6/E0/F4/508,
-                                        // MOD_Y_B). Was MISSING — the visible labels.
-    patch_frontend_vertical(s);         // THE systemic missing Y-bake: 21 front-end
-                                        // MOD_Y_B/MOD_Y_C anchors (char-select prompts,
-                                        // dressing-room, login, patch bars, ship-select).
-                                        // hs1.0/4:3 no-op. Confirms owner's hypothesis.
     // (Char-create class-select layout is an authoritative-source bake now —
     // folded into apply_startup_bakes() above (called right after the anzz1 bake),
     // which rewrites the 2 .text scene-init immediates + 2 .rdata portrait floats

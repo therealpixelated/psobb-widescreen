@@ -18,7 +18,7 @@ cl /nologo /c /O2 /W3 /GS- /Fop_trm.obj  /I %MH%\include  %MH%\src\trampoline.c
 cl /nologo /c /O2 /W3 /GS- /Fop_hde.obj  /I %MH%\include  %MH%\src\hde\hde32.c
 
 cl /nologo /LD /O2 /W3 /GS- /I %MH%\include ^
-   pso_widescreen.c anzz1_widescreen.c asset_registry.c asset_registry_generated.c mod_boot_poster.c mod_video.c ^
+   pso_widescreen.c asset_registry.c asset_registry_generated.c mod_boot_poster.c mod_video.c ^
    p_buf.obj p_hook.obj p_trm.obj p_hde.obj ^
    kernel32.lib user32.lib gdi32.lib winmm.lib ^
    mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib ^
