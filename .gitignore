@@ -1,15 +1,10 @@
 # build artifacts
 *.obj
-*.exe
-*.asi
+*.exp
+*.lib
 *.ilk
 *.pdb
-*.lib
-*.exp
-# scratch / logs
-_*
-*.log
-*.tmp
+# OS
 .DS_Store
 Thumbs.db
 __pycache__/
