@@ -8,7 +8,7 @@ REM copying it to PSOBB.IO\patches\.
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars32.bat" >nul 2>&1
 cd /d "%~dp0"
 
-del pso_widescreen.obj anzz1_widescreen.obj pso_widescreen.exp pso_widescreen.lib pso_widescreen.asi p_*.obj 2>nul
+del pso_widescreen.obj pso_widescreen.exp pso_widescreen.lib pso_widescreen.asi p_*.obj 2>nul
 
 REM ----- MinHook (for Phase-3 sprite-primitive inline hook 2026-05-10) -----
 set MH=..\_shared\minhook
