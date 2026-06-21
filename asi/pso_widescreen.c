@@ -906,6 +906,22 @@ static void load_config(void)
     // the design width) breaks the widescreen render path / hangs the device.
     // An explicit Width/Height in the INI (dev override) still wins; the
     // widescreen.cfg read above already filled them if the launcher set them.
+    // For borderless-fullscreen (Windowed=2), render at the ACTUAL desktop
+    // resolution — super-resolution / DSR aware — and FORCE the backbuffer to
+    // it, so the game renders natively at whatever the desktop is set to (1440p,
+    // 4K, ...) instead of a stale widescreen.cfg value the launcher wrote. The
+    // render res, the 2D affine (render_w/design_w) and the engine resolution
+    // table all derive from this, so the whole layout follows automatically.
+    if (g_cfg.windowed == 2) {
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        if (sw >= 320 && sh >= 240) {
+            g_cfg.width  = sw;  g_cfg.height = sh;
+            g_cfg.logical_width = sw;  g_cfg.logical_height = sh;
+            g_cfg.override_backbuffer = 1;   // CreateDevice forces BB = desktop res
+        }
+    }
+    // Fallback for other window modes / unset: default to the primary monitor.
     if (g_cfg.width <= 0 || g_cfg.height <= 0) {
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
