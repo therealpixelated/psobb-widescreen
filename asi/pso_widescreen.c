@@ -326,7 +326,6 @@ static struct {
     // page transitions back to char-select. Stock ESC at the top does nothing
     // (deeper pages already back up one step in the engine). Additionally gated on
     // patch_charselect (the char-create escape hatch). Default 1.
-    int   cc_esc_back;         // 1 = ESC-at-top -> char-select. Default 1.
     // char-create knobs REMOVED. The fields cc_stretch / cc_content /
     // cc_content_dx / cc_stride_left / cc_stride_right / cc_split / cc_debug drove
     // the per-frame composer hook cc_quad_fix_c (@0x0082BB74), which was DELETED per
@@ -592,9 +591,6 @@ static void load_config(void)
                                        // footer Enter/Cancel stride pokes).
                                        // Model pan runs unconditionally via
                                        // patch_charselect_model_pan() (orthogonal world-space).
-    g_cfg.cc_esc_back         = 1;     // 2026-06-17: ESC at char-create TOP page
-                                       // (category/class-select) -> char-select.
-                                       // Also gated on patch_charselect.
     // char-create per-frame knob defaults REMOVED with the deleted
     // cc_quad_fix_c composer hook (no-per-frame-patching mandate). Char-create is
     // owned by the static apply_startup_bakes() pass; no per-frame cfg drives it.
@@ -756,7 +752,6 @@ static void load_config(void)
         }
         else if (_stricmp(key, "PatchRuneScale")    == 0) g_cfg.patch_rune_scale = atoi(val);
         else if (_stricmp(key, "PatchCharSelect")   == 0) g_cfg.patch_charselect = atoi(val);
-        else if (_stricmp(key, "CcEscBack")         == 0) g_cfg.cc_esc_back = atoi(val);
         // the char-create per-frame knobs (CcStretch / CcContent /
         // CcContentDx / CcStrideLeft / CcStrideRight / CcSplit / CcDebug) were
         // REMOVED with the deleted cc_quad_fix_c composer hook. They were never
@@ -1421,119 +1416,6 @@ static void cc_text_early_bake(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-// ---- ESC-at-TOP char-create -> char-select , REPLACES the stub) ----
-// HISTORY: the DISARMED stub fired request(2) -> TITLE (scene-index
-// reboot, Layer-1) on EVERY scene-5 ESC edge — a full pre-login reset that crashed
-// the client and clobbered the stock per-page ESC=back. That Layer-1 approach was
-// wrong (see the block comment above: char-select is a Layer-2 *screen-id*, NOT a
-// scene-machine scene). This is the proper Layer-2 replacement.
-//
-// GROUND TRUTH (decompiled client Psobb.exe-05112026.c, human-mapped symbols):
-// - Screen-id `main_menu_type_00a165f0` @0x00A165F0 holds 12 during char-create
-// (== game_mode_select_online_offline|connect_2, the between-menus sentinel
-// ShutdownGameEngine_0081e160 writes; there is NO case 12 in the menu dispatcher,
-// so the menu host is dormant while the char-create scene owns the screen). The
-// SHIPPED cc_box_x splice already gates on [0x00A165F0]==12 — a PROVEN char-create
-// discriminator. character_select=6 (enum main_menu_type, line 88719).
-// - Char-create sub-screen DEPTH = [0x00A7223C] (LIVE-MAPPED 0 at the TOP
-// class-select, 1 at the class-confirm sub-screen, 2 at the appearance (FACE/HAIR)
-// screen. (The old [0x00A723A0] gate was WRONG — that is the in-game Challenge-mode
-// state and holds FLOAT data at char-create.) The engine has NO CANCEL branch at the
-// TOP (depth 0 = the user-observed "ESC does nothing at the top"); deeper pages have
-// their own ESC=back. So firing ONLY at depth 0 never collides with engine back.
-// - The return is a VERIFIED TWO-STAGE transition (see cc_esc_back_tick + the memory
-// note charcreate-esc-to-charselect-transition-SOLVED). A one-shot screen-id-6 write
-// at char-create does NOTHING: the menu pump that rebuilds the host only ticks in the
-// main_menu SCENE (idx 2), not the dressing_room scene (idx 5). Stage A clears the
-// opening flag [0x00AAE980] (else scene 3/2 re-loops to char-create) and requests
-// scene 2; stage B waits for scene 2 + its (title) host, then does the Layer-2
-// screen-id-6 setter so the live pump rebuilds char-select (server re-fetches the
-// char list). We write the menu globals RAW — NOT a call to
-// SwitchToCharacterSelectMenu_008215a0, whose LIVE body has a real MessageBoxA
-// (call [0x8F8348], mov edi,edi prologue) that would block the render thread.
-//
-// VERIFIED LIVE from a real char-create (connected session) this lands at a
-// fully-populated char-select (list + 3D model + Esc/Cancel footer), screen-id 6.
-//
-// MECHANISM: runs from Hook_Present (the always-on render-thread Present hook, every
-// front-end frame), inside that hook's SEH. NO new .text hook -> ZERO risk to the
-// engine's existing per-page ESC=back (we never touch engine code; we read a few globals
-// + the ESC key and write the scene/menu globals via the engine's own primitives).
-// Rising-edge latched (g_cc_esc_prev_down) so it fires exactly once per press and
-// re-arms on release. GetAsyncKeyState is host-independent (no harness poke).
-#define CC_ESC_SCREENID_VA   0x00A165F0u  // main_menu_type (char-create==12, char-select==6, title==0)
-#define CC_ESC_DEPTH_VA      0x00A7223Cu  // char-create sub-screen DEPTH (0=top class-select,1=confirm,2=appearance)
-#define CC_ESC_PREVMENU_VA   0x00A165F8u  // g_PreviousMainMenuType
-#define CC_ESC_SOLODIRTY_VA  0x00ACA4E4u  // g_SoloMultiplayerFlag (1 == rebuild pump)
-#define CC_ESC_SCENEIDX_VA   0x00AAB384u  // committed scene-idx (char-create dressing_room==5, main_menu==2)
-#define CC_ESC_PENDSCENE_VA  0x00AAB388u  // pending scene-request (scene_manager commits -> scene-idx)
-#define CC_ESC_SCENEDIRTY_VA 0x00AAB394u  // scene-request dirty flag (1 => commit pending)
-#define CC_ESC_OPENING_VA    0x00AAE980u  // g_IsOpeningSequenceActive (byte); MUST be 0 or scene loops back to cc
-#define CC_ESC_HOST_VA       0x00ACA4E0u  // active front-end menu host ptr (NULL during char-create)
-#define CC_ESC_SCREENID_CC   12           // [0x00A165F0] value during char-create
-#define CC_ESC_SCREENID_SEL  6            // character_select enum value
-#define CC_ESC_SCENE_MENU    2            // main_menu scene-idx (where the 0x0081AA00 menu pump runs)
-
-// TWO-STAGE state machine. A one-shot screen-id-6 write at char-create CANNOT work: the
-// front-end menu pump @0x0081AA00 (which rebuilds the host) only ticks in the main_menu
-// SCENE (idx 2), NOT the dressing_room scene (idx 5). And requesting scene 2 cold-inits
-// the front-end and RESETS screen-id to 0 (title). So: stage A requests scene 2 (and
-// clears the opening flag, else scene re-loops to cc); stage B waits until scene 2 is up
-// with its (title) host built, THEN does the Layer-2 screen-id-6 setter so the live pump
-// tears down title and rebuilds char-select (which re-fetches the char list from the
-// server over the still-open ship socket). VERIFIED live — see the memory note
-// charcreate-esc-to-charselect-transition-SOLVED for the full proof of why one-shot fails.
-static int  g_cc_esc_prev_down = 0;       // rising-edge latch for ESC
-static int  g_cc_esc_state     = 0;       // 0=idle, 1=stage-A done, waiting for scene 2 + host
-static int  g_cc_esc_frames    = 0;       // safety timeout counter while state==1
-static LONG g_cc_esc_fired_n   = 0;       // diag: transitions performed
-static void cc_esc_back_tick(void)
-{
-    if (!g_cfg.cc_esc_back || !g_cfg.patch_charselect) return;
-
-    // ESC rising edge (0x8000 == currently down). Track our OWN edge so it fires once
-    // per press and re-arms on release; updated every frame so a held ESC never re-fires.
-    int esc_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    int rising   = (esc_down && !g_cc_esc_prev_down);
-    g_cc_esc_prev_down = esc_down;
-
-    // ---- STAGE B: a transition is in flight; complete it once scene 2 + host are up ----
-    if (g_cc_esc_state == 1) {
-        if (++g_cc_esc_frames > 1200) g_cc_esc_state = 0;   // ~safety timeout (never hang)
-        __try {
-            if (*(volatile uint32_t *)(uintptr_t)CC_ESC_SCENEIDX_VA == (uint32_t)CC_ESC_SCENE_MENU &&
-                *(volatile uint32_t *)(uintptr_t)CC_ESC_HOST_VA     != 0u &&
-                *(volatile uint32_t *)(uintptr_t)CC_ESC_SCREENID_VA == 0u) {
-                // Title host built (cold init done). Layer-2 setter -> pump rebuilds char-select.
-                *(volatile uint32_t *)(uintptr_t)CC_ESC_PREVMENU_VA  = 0u;                        // prev = title
-                *(volatile uint32_t *)(uintptr_t)CC_ESC_SCREENID_VA  = (uint32_t)CC_ESC_SCREENID_SEL; // -> 6
-                *(volatile uint32_t *)(uintptr_t)CC_ESC_SOLODIRTY_VA = 1u;                        // dirty -> rebuild
-                g_cc_esc_state = 0;
-                LONG n = InterlockedIncrement(&g_cc_esc_fired_n);
-                log_line("[cc-esc-back] stage B: screen-id 6 + dirty -> char-select rebuild (fire #%ld)",
-                         (long)n);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { g_cc_esc_state = 0; }
-        return;                                          // don't start a new transition mid-flight
-    }
-
-    // ---- STAGE A: ESC at the char-create TOP (class-select) -> request scene 2 ----
-    if (!rising) return;
-    // Gate: screen-id == char-create(12) AND sub-screen DEPTH == 0 (TOP class-select only,
-    // so the engine's deeper-page CANCEL=back is never disturbed). SEH-guarded.
-    __try {
-        if (*(volatile uint32_t *)(uintptr_t)CC_ESC_SCREENID_VA == (uint32_t)CC_ESC_SCREENID_CC &&
-            *(volatile uint32_t *)(uintptr_t)CC_ESC_DEPTH_VA    == 0u) {
-            *(volatile uint8_t  *)(uintptr_t)CC_ESC_OPENING_VA    = 0u;                       // clear opening flag
-            *(volatile uint32_t *)(uintptr_t)CC_ESC_PENDSCENE_VA  = (uint32_t)CC_ESC_SCENE_MENU; // pending = main_menu
-            *(volatile uint32_t *)(uintptr_t)CC_ESC_SCENEDIRTY_VA = 1u;                       // commit it
-            g_cc_esc_state  = 1;
-            g_cc_esc_frames = 0;
-            log_line("[cc-esc-back] stage A: ESC@top char-create -> request scene 2 (await menu host)");
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
-
 // Present (slot 15) — render the boot poster ONTO the current backbuffer
 // before the engine flips it. The boot_poster module checks its own
 // auto-disable conditions on each call, so once any condition trips this
@@ -1542,14 +1424,6 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
     IDirect3DDevice8 *self, const RECT *pSrc, const RECT *pDst,
     HWND hOverride, void *pDirtyRegion)
 {
-    // Per-frame ESC -> back-to-char-select poll (Layer-2). Pure early-return unless
-    // ESC rises while screen-id [0x00A165F0]==12 (char-create) AND page state
-    // [0x00A723A0]==0 (TOP category/class-select page). Runs every front-end frame
-    // regardless of VideoEnable; SEH-firewalled so it can never throw into Present.
-    __try {
-        cc_esc_back_tick();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
     // FIX A — one-shot early bake of the char-create description-text X. Fires
     // ONCE on the first frame design_w reads widescreen (long before char-create),
     // then self-retires to a single compare+branch. NOT a per-frame poke, so the
