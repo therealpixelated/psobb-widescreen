@@ -4051,14 +4051,21 @@ static int patch_dressingroom_layout(const ws_scale_ctx *s)
         log_line("[pso_widescreen] dressroom: SKIP (disabled or 4:3 identity)");
         return 1;
     }
-    const float right = (s->A - 640.0f);   // MOD_X_R far-X stride; +213.333 @16:9/hs1.0
+    // char-create draws in the NATIVE front-end design space (853.33); HudScale does
+    // NOT apply to the front-end, so the MOD_X_R stride is the CONSTANT (853.33-640)
+    // = 213.33 at every HudScale -- matching Ephinea's exact .data values from the
+    // byte delta (0x0091D988 606->819.33, 0x0091DC74 604->817.33, 0x0091DD1C 614->827.33).
+    // s->A is the HudScale-scaled design width (853.33*hud_scale); divide hud_scale back
+    // out to recover the native 853.33. (The old (s->A-640) over-shot 5x at hs2.0.)
+    const float dw_native = (g_cfg.hud_scale > 0.01f) ? (s->A / g_cfg.hud_scale) : s->A;
+    const float right = dw_native - 640.0f;   // = 213.333 native, Ephinea-exact
+    // Only the 3 VAs Ephinea actually patches (eph_only in the delta). It does NOT touch
+    // the honeycomb .text frames (0x004EC0AF/0x004EC951) or the Input-Name field
+    // (0x0091DC80) -- so neither do we.
     static const struct { uint32_t va; uint32_t stock_bits; } R[] = {
-        { 0x004EC0AFu, 0x44230000u },   // 652.0 DR Enter/Exit honeycomb Right edge (.text)
-        { 0x004EC951u, 0x442A0000u },   // 680.0 DR Transition honeycomb Right edge (.text)
-        { 0x0091D988u, 0x44178000u },   // 606.0 DR Top OK/Back row X (live, Trinity says 614)
-        { 0x0091DC74u, 0x44170000u },   // 604.0 DR Character-Name field X
-        { 0x0091DC80u, 0x44170000u },   // 604.0 DR Input-Name field X
-        { 0x0091DD1Cu, 0x44198000u },   // 614.0 DR Bottom OK/Back row X
+        { 0x0091D988u, 0x44178000u },   // 606.0 DR Top OK/Back row X    -> 819.33 (Ephinea)
+        { 0x0091DC74u, 0x44170000u },   // 604.0 DR Character-Name field -> 817.33 (Ephinea)
+        { 0x0091DD1Cu, 0x44198000u },   // 614.0 DR Bottom OK/Back row X -> 827.33 (Ephinea)
     };
     int n = 0;
     for (int i = 0; i < (int)(sizeof(R)/sizeof(R[0])); i++) {
@@ -4070,7 +4077,7 @@ static int patch_dressingroom_layout(const ws_scale_ctx *s)
             if (patch_write(R[i].va, &want, 4, "dressroom MOD_X_R")) n++;
         }
     }
-    log_line("[pso_widescreen] dressroom: MOD_X_R += %.3f (%d/6)", right, n);
+    log_line("[pso_widescreen] dressroom: MOD_X_R += %.3f native (Ephinea-exact) (%d/3)", right, n);
     return 1;
 }
 
