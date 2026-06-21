@@ -61,6 +61,7 @@
 #include <MinHook.h>          // MinHook detours (char-create composer hooks).
 #include "asset_registry.h"
 #include "anzz1_widescreen.h"
+#include "ephinea_layout_table.h"   // Ephinea's EXACT front-end .data layout values (1:1)
 // REFACTOR: sodaboy_tables.h retired — the entire Sodaboy LOOP/
 // Region coordinate bake was removed (anzz1 is the sole static coordinate
 // source of truth). No other TU consumes those tables.
@@ -5535,6 +5536,30 @@ static int patch_frontend_vertical(const ws_scale_ctx *s)
 // then (2) patch_minimap_layout (bake-on-top of anzz1's 0xA11324/E8), then the
 // engine-independent companions (each keeps its per-feature knob). splash-phase2
 // is de-conflicted vs anzz1 inside the function (skips the 2 shared x2 VAs).
+// apply_ephinea_layout — apply Ephinea's EXACT front-end/char-select/char-create .data
+// layout values 1:1 (Ephinea's own bytes from the byte delta). Force-writes (overriding
+// any earlier poke of ours) so every covered VA is byte-identical to Ephinea. Pointer-
+// redirects + the 0x008F8328 HUDWidth pointer table are NOT in the table (they target
+// ephinea.dll, which is not loaded in this client). Runs once, after apply_static_patches.
+static int apply_ephinea_layout(void)
+{
+    const int total = (int)(sizeof(kEphineaLayout) / sizeof(kEphineaLayout[0]));
+    int n = 0;
+    for (int i = 0; i < total; i++) {
+        const eph_layout_t *e = &kEphineaLayout[i];
+        __try {
+            if (memcmp((const void *)(uintptr_t)e->va, e->eph, e->len) == 0) continue; // already Ephinea
+            DWORD old;
+            if (!VirtualProtect((LPVOID)(uintptr_t)e->va, e->len, PAGE_EXECUTE_READWRITE, &old)) continue;
+            memcpy((void *)(uintptr_t)e->va, e->eph, e->len);
+            DWORD tmp; VirtualProtect((LPVOID)(uintptr_t)e->va, e->len, old, &tmp);
+            n++;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    log_line("[pso_widescreen] ephinea-layout: applied %d/%d Ephinea-exact .data values", n, total);
+    return n;
+}
+
 static void apply_static_patches(const ws_scale_ctx *s)
 {
     // (1) anzz1 coordinate bake — THE static coordinate source of truth.
@@ -5998,6 +6023,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         if (g_scale.enabled) {
             log_line("[pso_widescreen] apply: anzz1 authoritative coords + companions (one gate, no engine selector)");
             apply_static_patches(&g_scale);
+            apply_ephinea_layout();   // Ephinea-exact .data layout, 1:1 — overrides our pokes
             apply_engine_patches(&g_scale);
         }
         // d3d8.dll might already be loaded (pulled in via the static
