@@ -62,11 +62,6 @@
 #include "asset_registry.h"
 #include "pso_widescreen.h"
 
-// The now-unused patch_* statics (their CALLS were removed when the unified
-// kBakes[] table took over; the function BODIES are deleted in a follow-up step)
-// trip MSVC C4505 (unreferenced local function). Suppress so the build stays
-// clean WITHOUT deleting the bodies yet.
-#pragma warning(disable:4505)
 // REFACTOR: sodaboy_tables.h retired — the entire Sodaboy LOOP/
 // Region coordinate bake was removed (anzz1 is the sole static coordinate
 // source of truth). No other TU consumes those tables.
@@ -380,31 +375,13 @@ static struct {
     // quadrant. THIS is the "white frame edges in upper-left" symptom.
     //
 
-    // quest-transition auto-capture instrumentation.
-    // Transitions are transient (1-2s) so we can't ask the user to "sit on
-    // it" for log capture. Instead, the existing sprite-primitive hooks
-    // (phase-3 + 4 siblings) already see EVERY engine sprite call. When
-    // CaptureTransition=1, we additionally:
-    // - Monitor [0xAAFCA0] (CurrentFloor) on every Present.
-    // - Monitor [0xA9CA40] & 0x2 (quest-load active flag, gates fcn.0078ddb8).
-    // - When either changes / fires, mark the next 120 frames as a "capture
-    // window" and route ALL sprite_log_event calls into a separate file
-    // pso_transition_capture.log (in install dir, next to widescreen.cfg).
-    // - Cap at 3 capture windows total per session, then auto-disable.
-    // The captured log lets us enumerate caller VAs that fire ONLY during
-    // the transition (not during normal gameplay) — those are the residual
-    // un-patched sites for future iterations.
-    int      capture_transition;
-
     // (Was: phase1_max_call — removed cleanup. Was a knob for
     // the now-dead patch_splash_phase1 path; never consumed since 2026-
     // 05-06 phase-1 retirement.)
     int   debug_log;
-    int   debug_log_verbose;   // 1 = firehose mode: logs EVERY hooked sprite
-                               // primitive call + every camera-tick (for frame
-                               // delta accounting). Removes the 500-call cap on
-                               // phase3 diagnostics and arms the 4 sibling
-                               // logging-only hooks. Default 0. DebugLogsEnabled
+    int   debug_log_verbose;   // 1 = firehose mode: emits the extra per-feature
+                               // diagnostic lines (e.g. the char-create backdrop
+                               // column-fill trace). Default 0. DebugLogsEnabled
                                // must ALSO be 1 for the verbose lines to land
                                // in pso_widescreen.log (verbose is purely a
                                // gating extension on top of debug_log).
@@ -622,7 +599,6 @@ static void load_config(void)
     g_cfg.flare_scale         = 6.0f;  // 1.5× of the stock 4.0 descriptor scale.
     // REFACTOR: patch_phase3 / patch_title_art / patch_title_real /
     // title_real_mode / widescreen_engine_anzz1 defaults removed (fields gone).
-    g_cfg.capture_transition     = 0; // Diagnostic-only. Tied to sibling sprite hooks.
     g_cfg.debug_log           = 0;
     g_cfg.debug_log_verbose   = 0;
     // Boot poster defaults — feature ON by default, sensible auto-disable.
@@ -731,7 +707,6 @@ static void load_config(void)
         // PatchTitleReal / TitleRealMode keys RETIRED with the Sodaboy path.
         // Old INIs carrying them fall through harmlessly (unknown-key path).
         else if (_stricmp(key, "PatchSplashPhase2") == 0) g_cfg.patch_splash_phase2 = atoi(val);
-        else if (_stricmp(key, "CaptureTransition")    == 0) g_cfg.capture_transition     = atoi(val);
         else if (_stricmp(key, "HUDScale")          == 0) {
             float s = (float)atof(val);
             if (s > 0.1f && s < 10.0f) g_cfg.hud_scale = s;
@@ -1250,12 +1225,6 @@ static HRESULT STDMETHODCALLTYPE Hook_SetViewport(
     return real_SetViewport(self, pViewport);
 }
 
-// Forward declaration — defined alongside the transition-capture
-// instrumentation later in this file. Polls [0xAAFCA0]/[0xA9CA40] every
-// frame and toggles the capture window. Cheap fast path when capture is
-// disabled (single int compare + early return).
-static void transition_poll(void);
-
 // In-game re-assert, fired once per FE->IG transition (defined below).
 static void ingame_reassert_on_transition(void);
 
@@ -1481,14 +1450,6 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
                      g_cfg.width, g_cfg.height, g_cfg.logical_width,
                      g_cfg.logical_height);
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    // Quest-transition state poll. Fires every Present (~60 Hz) so the
-    // 120-frame capture window covers ~2 seconds — more than enough for
-    // the visible transition. Disabled-fast-path is single-load + cmp.
-    __try {
-        transition_poll();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Capture must never poison Present. Same firewall philosophy.
     }
     ingame_reassert_on_transition();   // edge-driven; no per-frame work
     // char-select 1.0-look PIN reverted — char-select scales with
@@ -2029,603 +1990,6 @@ static float ui_coord(float design)
 }
 
 // ============================================================
-// Phase-3 sprite primitive hook — RESTORED
-// ============================================================
-// (Stale "REMOVED " comment block deleted . The
-// hook is now live in install_phase3_hook + splash_quad_rewrite_c
-// above; the prior removal's NULL-refcount crash root cause was the
-// heuristic-mode caller-VA acceptance that this implementation
-// intentionally omits in favor of strict-VA gating.)
-
-// ============================================================
-// Sprite-primitive diagnostics infrastructure (shared by all 5 hooks)
-// ============================================================
-// Goal: SEE which engine draws traverse our patches and which don't.
-// Phase-3 already rewrites; siblings are log-only. A unified counter +
-// caller-VA distribution keeps the verbose log tractable.
-//
-// Layout:
-// - g_sprite_call_n       = atomic monotonic call counter across ALL
-// 5 hooked primitives + camera-tick.
-// - g_sprite_per_prim[5]  = per-primitive call counts.
-// - g_caller_table        = open-addressing hash table 256 entries
-// mapping caller VA -> count. Saturated
-// once full (older VAs preserved, new ones
-// dropped, single saturation log).
-// - g_caller_overflow     = nonzero once table full, prevents repeat
-// log lines.
-// - g_sprite_at_last_dump = snapshot of g_sprite_call_n at last dump
-// so we know how many calls happened in the
-// current dump bucket.
-// - g_camera_tick_n       = camera-update fn (=once-per-frame) counter.
-// - g_sprite_at_last_tick = snapshot at last camera tick → frame delta.
-
-#define SPRITE_PRIM_COUNT       5
-#define SPRITE_PRIM_PHASE3      0   // 0x0082B440 (rewrites)
-#define SPRITE_PRIM_SIBLING_BB  1   // 0x0082BB74 (log-only)
-#define SPRITE_PRIM_SIBLING_F1  2   // 0x0082F1D0 (log-only)
-#define SPRITE_PRIM_SIBLING_36  3   // 0x0083669C (log-only)
-#define SPRITE_PRIM_DUP_B654    4   // 0x0082B654 — INSIDE 0x0082B440. Counter
-                                    // exists so the table dimension matches the
-                                    // 5 user-listed sites; install attempt
-                                    // detects the conflict and skips.
-
-static const char *kPrimNames[SPRITE_PRIM_COUNT] = {
-    "0x0082B440", "0x0082BB74", "0x0082F1D0", "0x0083669C", "0x0082B654"
-};
-
-static volatile LONG g_sprite_call_n        = 0;
-static volatile LONG g_sprite_per_prim[SPRITE_PRIM_COUNT] = {0};
-static volatile LONG g_sprite_at_last_dump  = 0;
-static volatile LONG g_camera_tick_n        = 0;
-static volatile LONG g_sprite_at_last_tick  = 0;
-static volatile LONG g_frames_no_sprite_n   = 0;
-
-#define CALLER_TABLE_CAP 256
-static volatile uint32_t g_caller_va[CALLER_TABLE_CAP];   // 0 = empty
-static volatile LONG     g_caller_cnt[CALLER_TABLE_CAP];
-static volatile LONG     g_caller_used     = 0;
-static volatile LONG     g_caller_overflow = 0;
-
-// Open-addressing hash insert/increment. Linear probing. Single-pass on hit
-// or empty; saturates the table once 75% full to keep probe chains short.
-// Uses InterlockedCompareExchange on the slot's VA to claim it atomically.
-// Race tolerable: a few lost increments at table boundary won't change a
-// caller-VA distribution dump that's only sampling top-10.
-static void caller_table_record(uint32_t va)
-{
-    if (va == 0) return;
-    if (g_caller_overflow) return;
-    // Hash: Knuth multiplicative on the lower 24 bits where most psobb
-    // code lives, mod table cap. Cheap and avoids modulo with prime.
-    uint32_t h = (va * 2654435761u) & (CALLER_TABLE_CAP - 1);
-    for (int probe = 0; probe < CALLER_TABLE_CAP; ++probe) {
-        uint32_t idx = (h + (uint32_t)probe) & (CALLER_TABLE_CAP - 1);
-        uint32_t cur = g_caller_va[idx];
-        if (cur == va) {
-            InterlockedIncrement(&g_caller_cnt[idx]);
-            return;
-        }
-        if (cur == 0) {
-            // Try to claim.
-            uint32_t prev = (uint32_t)InterlockedCompareExchange(
-                (LONG volatile *)&g_caller_va[idx], (LONG)va, 0);
-            if (prev == 0 || prev == va) {
-                InterlockedIncrement(&g_caller_cnt[idx]);
-                LONG used = InterlockedIncrement(&g_caller_used);
-                if (used >= (CALLER_TABLE_CAP * 3 / 4)) {
-                    LONG was = InterlockedExchange(&g_caller_overflow, 1);
-                    if (!was) {
-                        log_line("[pso_widescreen] caller VA hash table saturated "
-                                 "(%ld unique VAs) — dropping new VAs",
-                                 (long)used);
-                    }
-                }
-                return;
-            }
-            // Lost the race — continue probing.
-            continue;
-        }
-        // Occupied by different VA — keep probing.
-    }
-    // Full. Set overflow without logging twice.
-    if (InterlockedExchange(&g_caller_overflow, 1) == 0) {
-        log_line("[pso_widescreen] caller VA hash table full on probe-exhaust");
-    }
-}
-
-// Periodic dump triggered every 1000 sprite calls. Lists per-primitive
-// counts + top-10 caller VAs by frequency. One fixed-size pass through
-// the table; selection sort the top-10 to avoid an alloc.
-static void sprite_dump_distribution(void)
-{
-    // Snapshot per-prim counts and frame counters.
-    LONG total = g_sprite_call_n;
-    LONG ticks = g_camera_tick_n;
-    LONG nodraw = g_frames_no_sprite_n;
-    char prim_buf[256]; prim_buf[0] = 0;
-    for (int p = 0; p < SPRITE_PRIM_COUNT; ++p) {
-        char piece[48];
-        _snprintf_s(piece, sizeof(piece), _TRUNCATE,
-                    p == 0 ? "%s=%ld" : " %s=%ld",
-                    kPrimNames[p], (long)g_sprite_per_prim[p]);
-        size_t cur = strlen(prim_buf);
-        size_t room = sizeof(prim_buf) - cur - 1;
-        if (room > 0) strncat_s(prim_buf, sizeof(prim_buf), piece, room);
-    }
-    log_line("[pso_widescreen] dist@%ld total=%ld ticks=%ld no_sprite_frames=%ld | per-prim: %s",
-             (long)total, (long)total, (long)ticks, (long)nodraw, prim_buf);
-    // Top-10 caller VAs.
-    int top_idx[10];
-    LONG top_cnt[10];
-    for (int i = 0; i < 10; ++i) { top_idx[i] = -1; top_cnt[i] = 0; }
-    for (int i = 0; i < CALLER_TABLE_CAP; ++i) {
-        LONG c = g_caller_cnt[i];
-        if (c <= 0) continue;
-        // Find the smallest in top, replace if c > it.
-        int min_pos = 0;
-        for (int j = 1; j < 10; ++j) {
-            if (top_cnt[j] < top_cnt[min_pos]) min_pos = j;
-        }
-        if (c > top_cnt[min_pos]) {
-            top_cnt[min_pos] = c;
-            top_idx[min_pos] = i;
-        }
-    }
-    // Sort top 10 descending by count (selection sort, n=10).
-    for (int i = 0; i < 9; ++i) {
-        int max_pos = i;
-        for (int j = i + 1; j < 10; ++j) {
-            if (top_cnt[j] > top_cnt[max_pos]) max_pos = j;
-        }
-        if (max_pos != i) {
-            LONG tc = top_cnt[i]; top_cnt[i] = top_cnt[max_pos]; top_cnt[max_pos] = tc;
-            int ti = top_idx[i]; top_idx[i] = top_idx[max_pos]; top_idx[max_pos] = ti;
-        }
-    }
-    char tbuf[512]; tbuf[0] = 0;
-    for (int i = 0; i < 10; ++i) {
-        if (top_idx[i] < 0 || top_cnt[i] <= 0) break;
-        char piece[40];
-        _snprintf_s(piece, sizeof(piece), _TRUNCATE,
-                    i == 0 ? "0x%08x:%ld" : " 0x%08x:%ld",
-                    (unsigned)g_caller_va[top_idx[i]], (long)top_cnt[i]);
-        size_t cur = strlen(tbuf);
-        size_t room = sizeof(tbuf) - cur - 1;
-        if (room > 0) strncat_s(tbuf, sizeof(tbuf), piece, room);
-    }
-    log_line("[pso_widescreen] dist@%ld top10 callers: %s%s",
-             (long)total, tbuf[0] ? tbuf : "(none)",
-             g_caller_overflow ? " [SAT]" : "");
-}
-
-// Shared event sink invoked from EVERY sprite-primitive hook stub
-// (phase3 + 4 siblings). Increments counters, records caller VA, emits
-// verbose-mode log line, and triggers the periodic distribution dump.
-//
-// quad_ptr_or_zero: phase-3's ecx-quad pointer when prim_id==0; the other
-// primitives don't have a uniform quad layout in ecx,
-// so they pass 0 and the log line omits quad coords.
-// action: human-readable outcome from phase-3 ("rewrote_strict",
-// "rewrote_heuristic", "skipped"); siblings always pass
-// "sibling_log_only".
-//
-// Forward declaration for the quest-transition capture sink — defined
-// later in this file alongside the rest of the transition instrumentation.
-// Cheap when the capture window is closed (single g_transition_window_remaining
-// load + branch in transition_window_open).
-static int transition_window_open(void);
-static void transition_log_event(int prim_id, uint32_t caller_va,
-                                 uint32_t ecx, uint32_t quad_ptr_or_zero,
-                                 const char *action, LONG seq);
-
-static void sprite_log_event(int prim_id, uint32_t caller_va,
-                             uint32_t ecx, uint32_t quad_ptr_or_zero,
-                             const char *action)
-{
-    if (prim_id < 0 || prim_id >= SPRITE_PRIM_COUNT) return;
-    LONG seq = InterlockedIncrement(&g_sprite_call_n);
-    InterlockedIncrement(&g_sprite_per_prim[prim_id]);
-    caller_table_record(caller_va);
-    // Quest-transition capture sink. No-op fast path when window closed.
-    if (transition_window_open()) {
-        transition_log_event(prim_id, caller_va, ecx,
-                             quad_ptr_or_zero, action, seq);
-    }
-
-    // Cap per-call verbose emit at PHASE3_DIAG_VERBOSE_MAX to avoid the
-    // syscall storm tanking framerate. Periodic 1000-call dumps + camera
-    // tick FRAME-w/o-sprite-calls flag stay active forever.
-    static const LONG PHASE3_DIAG_VERBOSE_MAX = 5000;
-    if (g_cfg.debug_log && g_cfg.debug_log_verbose && seq <= PHASE3_DIAG_VERBOSE_MAX) {
-        float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-        int have_quad = 0;
-        if (quad_ptr_or_zero) {
-            __try {
-                const float *q = (const float *)(uintptr_t)quad_ptr_or_zero;
-                x1 = q[0]; y1 = q[1]; x2 = q[2]; y2 = q[3];
-                have_quad = 1;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                have_quad = 0;
-            }
-        }
-        if (have_quad) {
-            log_line("[pso_widescreen] sprite #%lu prim=%s caller=0x%08x "
-                     "ecx=0x%08x quad=(%.1f,%.1f)-(%.1f,%.1f) action=%s",
-                     (unsigned long)seq, kPrimNames[prim_id],
-                     (unsigned)caller_va, (unsigned)ecx,
-                     x1, y1, x2, y2, action);
-        } else {
-            log_line("[pso_widescreen] sprite #%lu prim=%s caller=0x%08x "
-                     "ecx=0x%08x quad=(no_decode) action=%s",
-                     (unsigned long)seq, kPrimNames[prim_id],
-                     (unsigned)caller_va, (unsigned)ecx, action);
-        }
-        if (seq == PHASE3_DIAG_VERBOSE_MAX) {
-            log_line("[pso_widescreen] verbose per-call log capped at %ld; periodic dumps continue",
-                     (long)PHASE3_DIAG_VERBOSE_MAX);
-        }
-    }
-
-    // Periodic dump every 1000 calls. Use atomic CAS on the milestone so
-    // exactly one thread wins per bucket boundary.
-    LONG last = g_sprite_at_last_dump;
-    if (seq - last >= 1000) {
-        if (InterlockedCompareExchange(&g_sprite_at_last_dump, seq, last) == last) {
-            sprite_dump_distribution();
-        }
-    }
-}
-
-// (Phase-3 implementation removed .)
-
-// ============================================================
-// Sibling sprite-primitive log-only hooks (3 entries, 1 conflict skip)
-// ============================================================
-// User-listed siblings of 0x0082B440. Resolved to function entries via
-// static disasm of psobb.exe (md5 076c4822be159e499ca0e4df662709b3):
-//
-// user VA       resolved fn entry  delta  prologue (5+ bytes safe?)
-// 0x0082B440 -> 0x0082B440         0      83 EC 70 D9 05 F0 C0 AC 00     YES (9 bytes — phase-3 already hooks)
-// 0x0082B654 -> 0x0082B440         -0x214 (CONFLICT — same fn as primary)
-// 0x0082BB79 -> 0x0082BB74         -0x5   83 EC 70 D9 05 E8 C0 AC 00     YES (9 bytes safe, fld [0xACC0E8])
-// 0x0082F4A5 -> 0x0082F1D0         -0x2D5 83 EC 40 8D 04 24              YES (6 bytes safe; sub esp,0x40 + lea eax,[esp])
-// 0x00836C8E -> 0x0083669C         -0x5F2 55 8B EC 6A FF 68 ...          YES (5 bytes safe; push ebp/mov/push -1)
-//
-// Each non-conflict hook is a 5+ byte E9 detour with a small RWX trampoline
-// holding the saved bytes + an E9 to the resume address. The naked stub
-// captures caller_va + ecx, calls sprite_log_event(prim_id, …) tagged
-// "sibling_log_only", then jmps the trampoline. Logging-only — no rewrite.
-
-typedef struct {
-    int          prim_id;            // SPRITE_PRIM_SIBLING_xx
-    uint32_t     target_va;          // function entry to detour
-    uint8_t      overwrite_len;      // bytes to redirect (>=5)
-    uint8_t      orig_bytes[16];     // saved prologue (only [0..overwrite_len) used)
-    void        *trampoline;         // RWX page with saved bytes + E9 to resume
-    int          installed;
-    const char  *label;
-} SiblingHook;
-
-#define SIBLING_BB_TARGET   0x0082BB74u
-#define SIBLING_BB_LEN      9
-#define SIBLING_F1_TARGET   0x0082F1D0u
-#define SIBLING_F1_LEN      6
-#define SIBLING_36_TARGET   0x0083669Cu
-#define SIBLING_36_LEN      5
-
-static SiblingHook g_sibling_bb = {
-    SPRITE_PRIM_SIBLING_BB, SIBLING_BB_TARGET, SIBLING_BB_LEN,
-    {0}, NULL, 0, "sibling@0x0082BB74"
-};
-static SiblingHook g_sibling_f1 = {
-    SPRITE_PRIM_SIBLING_F1, SIBLING_F1_TARGET, SIBLING_F1_LEN,
-    {0}, NULL, 0, "sibling@0x0082F1D0"
-};
-static SiblingHook g_sibling_36 = {
-    SPRITE_PRIM_SIBLING_36, SIBLING_36_TARGET, SIBLING_36_LEN,
-    {0}, NULL, 0, "sibling@0x0083669C"
-};
-
-// Mirror trampoline pointers as flat globals — MSVC inline asm has
-// inconsistent support for struct-member dereference, so we keep
-// these in sync with g_sibling_xx.trampoline at install time and
-// the naked stubs jump indirect through these flat slots.
-static void *g_sibling_bb_tramp = NULL;
-static void *g_sibling_f1_tramp = NULL;
-static void *g_sibling_36_tramp = NULL;
-
-// Per-sibling __stdcall handlers — the prim_id is encoded statically so
-// the asm stub doesn't have to push it. Each just routes to sprite_log_event.
-//
-// sibling_bb_handler upgraded from log-only to "log + decode".
-// Body of 0x0082BB74 reads ecx[0], ecx[4], ecx[8], ecx[0xc], ecx[0x10],
-// ecx[0x14], ecx[0x18] — a 7-float transformed-sprite struct, NOT the
-// 4-float (x1,y1,x2,y2) rectangle that 0x0082B440 reads. Layout per
-// static disasm 0x0082BB74..0x0082BBE0:
-// ecx[0x00] = anchor_x (multiplied by global scale, added to offset)
-// ecx[0x04] = anchor_y (same treatment, separate scale)
-// ecx[0x08] = displacement_x (subtracted from anchor)
-// ecx[0x0C] = basis_a_x
-// ecx[0x10] = basis_b_x
-// ecx[0x14] = basis_a_y
-// ecx[0x18] = basis_b_y
-// We pass ecx_val as the "quad pointer" so the existing sprite_log_event
-// quad-decode path reads q[0..3] — that's anchor_x, anchor_y,
-// displacement_x, basis_a_x. Best-effort visibility: not a true quad
-// shape, but enough to discriminate title-state plates (anchor at
-// canonical 4:3 positions) from particles (anchor near player or sub-
-// pixel-changing every frame). We deliberately do NOT rewrite via this
-// hook because the 7-float layout means a naive q[0]*=stretch would
-// shift the WHOLE plate off-anchor, not just stretch its extent. The
-// engine path that needs rewriting for title-state plates is the
-// phase-3 hook on 0x0082B440 (caller_va range matches handle that).
-static void __stdcall sibling_bb_handler(uint32_t caller_va, uint32_t ecx_val)
-{
-    __try {
-        sprite_log_event(SPRITE_PRIM_SIBLING_BB, caller_va, ecx_val,
-                         /*quad_ptr=*/ecx_val, "sibling_log_only");
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
-static void __stdcall sibling_f1_handler(uint32_t caller_va, uint32_t ecx_val)
-{
-    __try {
-        sprite_log_event(SPRITE_PRIM_SIBLING_F1, caller_va, ecx_val, 0,
-                         "sibling_log_only");
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
-static void __stdcall sibling_36_handler(uint32_t caller_va, uint32_t ecx_val)
-{
-    __try {
-        sprite_log_event(SPRITE_PRIM_SIBLING_36, caller_va, ecx_val, 0,
-                         "sibling_log_only");
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
-
-// Naked stubs. Same shape as phase3_stub:
-// pushad+pushfd, push ecx, push caller_va, call handler, popfd+popad,
-// jmp [trampoline].
-// caller_va sits at [esp+0x28] after pushad(0x20)+pushfd(4)+push ecx(4).
-__declspec(naked) static void sibling_bb_stub(void)
-{
-    __asm {
-        pushad
-        pushfd
-        push  ecx
-        push  dword ptr [esp + 0x28]
-        call  sibling_bb_handler
-        popfd
-        popad
-        jmp   dword ptr [g_sibling_bb_tramp]
-    }
-}
-__declspec(naked) static void sibling_f1_stub(void)
-{
-    __asm {
-        pushad
-        pushfd
-        push  ecx
-        push  dword ptr [esp + 0x28]
-        call  sibling_f1_handler
-        popfd
-        popad
-        jmp   dword ptr [g_sibling_f1_tramp]
-    }
-}
-__declspec(naked) static void sibling_36_stub(void)
-{
-    __asm {
-        pushad
-        pushfd
-        push  ecx
-        push  dword ptr [esp + 0x28]
-        call  sibling_36_handler
-        popfd
-        popad
-        jmp   dword ptr [g_sibling_36_tramp]
-    }
-}
-
-// Generic install routine — capture prologue, build trampoline, write E9.
-// Verifies expected_bytes match before writing; refuses if not.
-static int sibling_install(SiblingHook *h, void *stub_addr,
-                           const uint8_t *expected_bytes)
-{
-    if (h->installed) return 1;
-    const uint8_t *p = (const uint8_t *)(uintptr_t)h->target_va;
-    for (int i = 0; i < h->overwrite_len; ++i) {
-        if (p[i] != expected_bytes[i]) {
-            log_line("[pso_widescreen] %s prologue mismatch byte %d: "
-                     "got 0x%02x expected 0x%02x — refusing to hook",
-                     h->label, i, p[i], expected_bytes[i]);
-            return 0;
-        }
-        h->orig_bytes[i] = p[i];
-    }
-    void *page = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE,
-                              PAGE_EXECUTE_READWRITE);
-    if (!page) {
-        log_line("[pso_widescreen] %s trampoline alloc FAILED err=%lu",
-                 h->label, GetLastError());
-        return 0;
-    }
-    uint8_t *t = (uint8_t *)page;
-    memcpy(t, h->orig_bytes, h->overwrite_len);
-    t[h->overwrite_len] = 0xE9;
-    int32_t rel = (int32_t)((h->target_va + h->overwrite_len) -
-                            ((uintptr_t)t + h->overwrite_len + 5));
-    memcpy(t + h->overwrite_len + 1, &rel, 4);
-    h->trampoline = page;
-    // Mirror the tramp pointer to the matching flat global the naked
-    // stub references via `jmp dword ptr [g_sibling_xx_tramp]`.
-    switch (h->prim_id) {
-        case SPRITE_PRIM_SIBLING_BB: g_sibling_bb_tramp = page; break;
-        case SPRITE_PRIM_SIBLING_F1: g_sibling_f1_tramp = page; break;
-        case SPRITE_PRIM_SIBLING_36: g_sibling_36_tramp = page; break;
-        default: break;
-    }
-    DWORD old_prot = 0;
-    if (!VirtualProtect((LPVOID)(uintptr_t)h->target_va,
-                        h->overwrite_len, PAGE_EXECUTE_READWRITE,
-                        &old_prot)) {
-        log_line("[pso_widescreen] %s VirtualProtect FAILED err=%lu",
-                 h->label, GetLastError());
-        return 0;
-    }
-    uint8_t patch[16];
-    patch[0] = 0xE9;
-    int32_t rel_to_stub = (int32_t)((uintptr_t)stub_addr - (h->target_va + 5));
-    memcpy(patch + 1, &rel_to_stub, 4);
-    for (int i = 5; i < h->overwrite_len; ++i) patch[i] = 0x90;
-    memcpy((void *)(uintptr_t)h->target_va, patch, h->overwrite_len);
-    DWORD tmp = 0;
-    VirtualProtect((LPVOID)(uintptr_t)h->target_va,
-                   h->overwrite_len, old_prot, &tmp);
-    FlushInstructionCache(GetCurrentProcess(),
-                          (LPCVOID)(uintptr_t)h->target_va,
-                          h->overwrite_len);
-    h->installed = 1;
-    log_line("[pso_widescreen] %s armed @ 0x%08x -> stub 0x%p tramp 0x%p (overwrite=%d)",
-             h->label, (unsigned)h->target_va, stub_addr, h->trampoline,
-             (int)h->overwrite_len);
-    return 1;
-}
-
-static void sibling_install_all(void)
-{
-    // Conflict log: 0x0082B654 is INSIDE 0x0082B440's body (delta 0x214).
-    // Hooking it would either land mid-instruction (crash) or duplicate the
-    // phase-3 hook (already covered by the per-prim counter for Phase-3).
-    // Just record this for the user and skip.
-    log_line("[pso_widescreen] sibling@0x0082B654 SKIPPED: address is mid-body of 0x0082B440 "
-             "(delta -0x214) — already covered by Phase-3 hook");
-
-    // 0x0082BB74 — same shape as 0x0082B440.
-    static const uint8_t exp_bb[SIBLING_BB_LEN] = {
-        0x83, 0xEC, 0x70, 0xD9, 0x05, 0xE8, 0xC0, 0xAC, 0x00
-    };
-    sibling_install(&g_sibling_bb, (void *)&sibling_bb_stub, exp_bb);
-
-    // 0x0082F1D0 — sub esp,0x40; lea eax,[esp].
-    static const uint8_t exp_f1[SIBLING_F1_LEN] = {
-        0x83, 0xEC, 0x40, 0x8D, 0x04, 0x24
-    };
-    sibling_install(&g_sibling_f1, (void *)&sibling_f1_stub, exp_f1);
-
-    // 0x0083669C — push ebp; mov ebp,esp; push -1.
-    static const uint8_t exp_36[SIBLING_36_LEN] = {
-        0x55, 0x8B, 0xEC, 0x6A, 0xFF
-    };
-    sibling_install(&g_sibling_36, (void *)&sibling_36_stub, exp_36);
-}
-
-// ============================================================
-// Camera-tick hook (0x004D7698) — wrapper-agnostic frame counter
-// ============================================================
-// 0x004D7698 is the main camera update fn (per memory psobb_camera_struct.md).
-// It runs once per game tick — same cadence as IDXGISwapChain::Present in the
-// d3d8to11 sandbox. Hooking this gives us a wrapper-agnostic per-frame
-// callback without binding to the active D3D backend.
-//
-// Prologue: 56 55 53 8B D9 = push esi; push ebp; push ebx; mov ebx,ecx
-// → 5 bytes safe to overwrite, no relative jumps. Standard 5-byte E9 detour.
-
-#define CAMERA_TICK_VA      0x004D7698u
-#define CAMERA_TICK_LEN     5
-
-static uint8_t  g_camera_orig_bytes[CAMERA_TICK_LEN] = {0};
-static void    *g_camera_trampoline = NULL;
-static int      g_camera_installed = 0;
-
-static void __stdcall camera_tick_handler(void)
-{
-    LONG tick = InterlockedIncrement(&g_camera_tick_n);
-    LONG sprite_now = g_sprite_call_n;
-    LONG sprite_last = (LONG)InterlockedExchange(&g_sprite_at_last_tick, sprite_now);
-    LONG delta = sprite_now - sprite_last;
-    if (delta == 0) {
-        InterlockedIncrement(&g_frames_no_sprite_n);
-    }
-    if (g_cfg.debug_log && g_cfg.debug_log_verbose) {
-        log_line("[pso_widescreen] tick #%ld (sprite_total=%ld delta=%ld)%s",
-                 (long)tick, (long)sprite_now, (long)delta,
-                 delta == 0 ? " [FRAME w/ no sprite calls — likely bypass]" : "");
-    } else if (g_cfg.debug_log && delta == 0 && tick <= 600) {
-        // Non-verbose: still flag the first up-to-600 zero-sprite frames so
-        // a casual user with DebugLogsEnabled=1 sees the bypass markers
-        // during the boot/splash window without enabling firehose mode.
-        log_line("[pso_widescreen] tick #%ld FRAME w/ no sprite calls (sprite_total=%ld)",
-                 (long)tick, (long)sprite_now);
-    }
-}
-
-__declspec(naked) static void camera_tick_stub(void)
-{
-    __asm {
-        pushad
-        pushfd
-        call  camera_tick_handler
-        popfd
-        popad
-        jmp   dword ptr [g_camera_trampoline]
-    }
-}
-
-static void camera_tick_install(void)
-{
-    if (g_camera_installed) return;
-    static const uint8_t kExpected[CAMERA_TICK_LEN] = {
-        0x56, 0x55, 0x53, 0x8B, 0xD9
-    };
-    const uint8_t *p = (const uint8_t *)(uintptr_t)CAMERA_TICK_VA;
-    for (int i = 0; i < CAMERA_TICK_LEN; ++i) {
-        if (p[i] != kExpected[i]) {
-            log_line("[pso_widescreen] camera-tick prologue mismatch byte %d: "
-                     "got 0x%02x expected 0x%02x — refusing to hook",
-                     i, p[i], kExpected[i]);
-            return;
-        }
-        g_camera_orig_bytes[i] = p[i];
-    }
-    void *page = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE,
-                              PAGE_EXECUTE_READWRITE);
-    if (!page) {
-        log_line("[pso_widescreen] camera-tick trampoline alloc FAILED err=%lu",
-                 GetLastError());
-        return;
-    }
-    uint8_t *t = (uint8_t *)page;
-    memcpy(t, g_camera_orig_bytes, CAMERA_TICK_LEN);
-    t[CAMERA_TICK_LEN] = 0xE9;
-    int32_t rel = (int32_t)((CAMERA_TICK_VA + CAMERA_TICK_LEN) -
-                            ((uintptr_t)t + CAMERA_TICK_LEN + 5));
-    memcpy(t + CAMERA_TICK_LEN + 1, &rel, 4);
-    g_camera_trampoline = page;
-    DWORD old_prot = 0;
-    if (!VirtualProtect((LPVOID)(uintptr_t)CAMERA_TICK_VA, CAMERA_TICK_LEN,
-                        PAGE_EXECUTE_READWRITE, &old_prot)) {
-        log_line("[pso_widescreen] camera-tick VirtualProtect FAILED err=%lu",
-                 GetLastError());
-        return;
-    }
-    uint8_t patch[CAMERA_TICK_LEN];
-    patch[0] = 0xE9;
-    int32_t rel_to_stub = (int32_t)((uintptr_t)&camera_tick_stub -
-                                    (CAMERA_TICK_VA + 5));
-    memcpy(patch + 1, &rel_to_stub, 4);
-    memcpy((void *)(uintptr_t)CAMERA_TICK_VA, patch, CAMERA_TICK_LEN);
-    DWORD tmp = 0;
-    VirtualProtect((LPVOID)(uintptr_t)CAMERA_TICK_VA, CAMERA_TICK_LEN,
-                   old_prot, &tmp);
-    FlushInstructionCache(GetCurrentProcess(),
-                          (LPCVOID)(uintptr_t)CAMERA_TICK_VA, CAMERA_TICK_LEN);
-    g_camera_installed = 1;
-    log_line("[pso_widescreen] camera-tick hook armed @ 0x%08x -> stub 0x%p tramp 0x%p",
-             (unsigned)CAMERA_TICK_VA, (void *)&camera_tick_stub,
-             g_camera_trampoline);
-}
-
-// ============================================================
 // CHAR-CREATE HEX BACKDROP 16:9 FILL — add tile column(s) at the function tail
 // (RenderChallengePanelBackground_004ed008), NOT a per-frame composer poke.
 // ============================================================
@@ -2786,8 +2150,8 @@ __declspec(naked) static void cc_backdrop_stub(void)
 
 // Install the tail-splice. Sig-guarded (refuses unless the stock E8-call bytes are
 // present) and idempotent (installed-flag + sig check). The trampoline is built
-// manually (NOT via sibling_install) because the spliced instruction is a relative
-// E8 call that must be RE-ENCODED at the trampoline's address, not byte-copied.
+// manually (the saved prologue is not byte-copied) because the spliced instruction
+// is a relative E8 call that must be RE-ENCODED at the trampoline's address.
 static void cc_backdrop_install(void)
 {
     if (g_cc_backdrop_installed) return;
@@ -3181,27 +2545,6 @@ static void cc_box_y_install(void)
              (double)g_cc_ky);
 }
 
-// Final tally written on DLL_PROCESS_DETACH (and forced in verbose mode
-// every dump cycle via sprite_dump_distribution). Exposes per-prim totals
-// + phase3 path counters so the user has a closing snapshot even if the
-// 1000-call dump didn't fire near shutdown.
-static void sprite_log_final_tally(const char *reason)
-{
-    char prim_buf[256]; prim_buf[0] = 0;
-    for (int p = 0; p < SPRITE_PRIM_COUNT; ++p) {
-        char piece[48];
-        _snprintf_s(piece, sizeof(piece), _TRUNCATE,
-                    p == 0 ? "%s=%ld" : " %s=%ld",
-                    kPrimNames[p], (long)g_sprite_per_prim[p]);
-        size_t cur = strlen(prim_buf);
-        size_t room = sizeof(prim_buf) - cur - 1;
-        if (room > 0) strncat_s(prim_buf, sizeof(prim_buf), piece, room);
-    }
-    log_line("[pso_widescreen] tally(%s) total=%ld ticks=%ld no_sprite_frames=%ld | per-prim: %s",
-             reason ? reason : "?", (long)g_sprite_call_n,
-             (long)g_camera_tick_n, (long)g_frames_no_sprite_n, prim_buf);
-}
-
 // REFACTOR: RETIRED with the Sodaboy path —
 // HUD_VANILLA / REF_W / REF_H (dead Sodaboy HUD-rect reference),
 // load_psobb_image / read_stock_dword / read_stock_float (stock-image
@@ -3548,67 +2891,11 @@ static int patch_charselect_model_pan(void)
     return 1;
 }
 
-// Scale ONE float in place: read the stock value live from `addr`, multiply by
-// `factor`, write it back. No hardcoded stock value — the multiplier "boils down
-// to the source" so it works against any psobb.exe build and any scale knob. A
-// finite + sane-magnitude guard skips a relocated/already-patched/garbage slot
-// rather than corrupting it. Runs at ASI load (before the owning code executes),
-// so a code-immediate write needs no icache flush.
-static int scale_float_inplace(uintptr_t addr, float factor, const char *label)
-{
-    float v = *(volatile float *)addr;
-    // Reject NaN/Inf and absurd magnitudes (stock rune values are |v| < ~1000).
-    if (!(v == v) || v > 1.0e6f || v < -1.0e6f) {
-        log_line("[pso_widescreen] scale %s @ 0x%p: SKIP (unexpected value %g)",
-                 label, (void *)addr, v);
-        return 0;
-    }
-    float nv = v * factor;
-    return patch_write(addr, &nv, sizeof(nv), label);
-}
-
-
-
 // REFACTOR: apply_sodaboy_patches (the entire Sodaboy LOOP1-6 +
 // Region A1/A2/G coordinate bake, ~800 lines, incl. the inline patch_res_table
 // / patch_validator_nop / patch_extra_ui Region-H / patch_title_real /
 // patch_title_art blocks) is RETIRED. anzz1 is the sole static coordinate
 // source of truth (see apply_static_patches -> apply_anzz1_widescreen).
-
-// ============================================================
-// Quest-transition auto-capture instrumentation 
-// ============================================================
-// Transitions are transient (1-2s), so we can't ask the user to "sit on
-// it" for log capture. Instead we polynomially poll the engine's known
-// transition-state addresses on every Present hook:
-// [0x00AAFCA0] u32  CurrentFloor (changes when entering/leaving floor)
-// [0x00A9CA40] u32  bit 1 set while quest-loading screen is active
-// (gates fcn.0078ddb8; cleared by 0x0078ddad)
-// Either signal opens a 120-frame capture window during which sprite_log_event
-// (already invoked by every existing hook) ALSO writes a packed line to
-// pso_transition_capture.log. Caps at TRANSITION_MAX_WINDOWS (=3) capture
-// windows total per session, then auto-disables.
-//
-// File path is resolved alongside pso_widescreen.log. The capture file is
-// truncated on the FIRST window opening per session (so a fresh run starts
-// clean), then APPENDed for subsequent windows.
-
-#define TRANSITION_FLAG_VA       0x00A9CA40u
-#define TRANSITION_FLAG_BIT      0x2u
-#define TRANSITION_FLOOR_VA      0x00AAFCA0u
-#define TRANSITION_WINDOW_FRAMES 120
-#define TRANSITION_MAX_WINDOWS   3
-
-static volatile LONG  g_transition_window_remaining = 0;
-static volatile LONG  g_transition_windows_used     = 0;
-static volatile LONG  g_transition_lines_written    = 0;
-static char           g_transition_log_path[MAX_PATH];
-static HANDLE         g_transition_log_handle       = INVALID_HANDLE_VALUE;
-static CRITICAL_SECTION g_transition_log_cs;
-static int            g_transition_log_cs_init      = 0;
-static volatile uint32_t g_last_floor_seen          = 0;
-static volatile uint32_t g_last_flag_seen           = 0;
-static int               g_transition_first_window  = 1;
 
 // Photon-blast lens flare position pin .
 // The function at psobb!0x0083A5F0 copies a state struct's fields into
@@ -3732,162 +3019,6 @@ static void apply_splash_phase2(void)
     log_line("[pso_widescreen] splash-phase2: 0x009A3420 table stretched x%.4f "
              "(4 entries, %d x2-coord(s) left to anzz1: 0x9A3468/0x9A3488)",
              stretch, skipped);
-}
-
-static void transition_resolve_log_path(void)
-{
-    char exe[MAX_PATH] = {0};
-    if (GetModuleFileNameA(NULL, exe, MAX_PATH) == 0) return;
-    char *slash = strrchr(exe, '\\');
-    if (!slash) return;
-    *(slash + 1) = 0;
-    _snprintf_s(g_transition_log_path, MAX_PATH, _TRUNCATE,
-                "%spso_transition_capture.log", exe);
-}
-
-// Lazy file-open. Truncates on the very first window of the session,
-// appends thereafter. Returns the open handle or INVALID_HANDLE_VALUE.
-static HANDLE transition_log_handle(void)
-{
-    if (!g_transition_log_path[0]) return INVALID_HANDLE_VALUE;
-    if (!g_transition_log_cs_init) {
-        InitializeCriticalSection(&g_transition_log_cs);
-        g_transition_log_cs_init = 1;
-    }
-    if (g_transition_log_handle == INVALID_HANDLE_VALUE) {
-        if (g_transition_first_window) {
-            DeleteFileA(g_transition_log_path);
-            g_transition_first_window = 0;
-        }
-        g_transition_log_handle = CreateFileA(
-            g_transition_log_path, FILE_APPEND_DATA,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (g_transition_log_handle != INVALID_HANDLE_VALUE) {
-            SetFilePointer(g_transition_log_handle, 0, NULL, FILE_END);
-        }
-    }
-    return g_transition_log_handle;
-}
-
-static void transition_log_write(const char *fmt, ...)
-{
-    char buf[1024];
-    va_list ap; va_start(ap, fmt);
-    int n = _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
-    va_end(ap);
-    if (n < 0) n = (int)strlen(buf);
-    EnterCriticalSection(&g_transition_log_cs);
-    HANDLE h = transition_log_handle();
-    if (h != INVALID_HANDLE_VALUE) {
-        DWORD wrote = 0;
-        WriteFile(h, buf, (DWORD)n, &wrote, NULL);
-        WriteFile(h, "\r\n", 2, &wrote, NULL);
-    }
-    LeaveCriticalSection(&g_transition_log_cs);
-    InterlockedIncrement(&g_transition_lines_written);
-}
-
-// transition_poll: called from Hook_Present every frame. Detects window-
-// opening events and decrements the remaining-frame counter. Idempotent on
-// "no transition" — single load + cmp on the hot path.
-static void transition_poll(void)
-{
-    if (!g_cfg.capture_transition) return;
-    if (g_transition_windows_used >= TRANSITION_MAX_WINDOWS) return;
-
-    uint32_t floor = 0, flag = 0;
-    __try {
-        floor = *(volatile uint32_t *)TRANSITION_FLOOR_VA;
-        flag  = *(volatile uint32_t *)TRANSITION_FLAG_VA;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-    int trigger = 0;
-    const char *trigger_reason = "";
-    // Floor change -> trigger.
-    if (floor != g_last_floor_seen) {
-        if (g_last_floor_seen != 0) {
-            // Skip the very first read (initial value), only fire on actual
-            // transitions during play.
-            trigger = 1;
-            trigger_reason = "floor_change";
-        }
-        g_last_floor_seen = floor;
-    }
-    // Flag bit-1 newly set -> trigger.
-    const uint32_t flag_bit_now = flag & TRANSITION_FLAG_BIT;
-    const uint32_t flag_bit_old = g_last_flag_seen & TRANSITION_FLAG_BIT;
-    if (flag_bit_now && !flag_bit_old) {
-        trigger = 1;
-        trigger_reason = "loadflag_set";
-    }
-    g_last_flag_seen = flag;
-
-    if (trigger) {
-        // Fresh window: reset remaining counter, increment used.
-        LONG used = InterlockedIncrement(&g_transition_windows_used);
-        InterlockedExchange(&g_transition_window_remaining,
-                            TRANSITION_WINDOW_FRAMES);
-        transition_log_write(
-            "=== window %ld/%d OPEN reason=%s floor=0x%08x flag=0x%08x sprite_total=%ld",
-            (long)used, TRANSITION_MAX_WINDOWS, trigger_reason,
-            (unsigned)floor, (unsigned)flag, (long)g_sprite_call_n);
-        log_line("[pso_widescreen] transition capture: window %ld OPEN reason=%s floor=0x%08x",
-                 (long)used, trigger_reason, (unsigned)floor);
-    } else if (g_transition_window_remaining > 0) {
-        // Tick down. When it hits zero, log a closing line.
-        LONG rem = InterlockedDecrement(&g_transition_window_remaining);
-        if (rem == 0) {
-            transition_log_write(
-                "=== window CLOSE sprite_total=%ld lines_written=%ld",
-                (long)g_sprite_call_n, (long)g_transition_lines_written);
-            log_line("[pso_widescreen] transition capture: window CLOSE (%ld windows used / %d max, %ld lines)",
-                     (long)g_transition_windows_used, TRANSITION_MAX_WINDOWS,
-                     (long)g_transition_lines_written);
-        }
-    }
-}
-
-// transition_log_event: called from sprite_log_event when a window is open.
-// Writes a packed one-liner per call so the hot path stays cheap.
-// Re-uses the same data the regular sprite log sees but in CSV-ish form
-// for easy post-processing.
-static int transition_window_open(void)
-{
-    return g_cfg.capture_transition &&
-           g_transition_window_remaining > 0;
-}
-
-static void transition_log_event(int prim_id, uint32_t caller_va,
-                                 uint32_t ecx, uint32_t quad_ptr_or_zero,
-                                 const char *action, LONG seq)
-{
-    if (!transition_window_open()) return;
-    float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-    int have_quad = 0;
-    if (quad_ptr_or_zero) {
-        __try {
-            const float *q = (const float *)(uintptr_t)quad_ptr_or_zero;
-            x1 = q[0]; y1 = q[1]; x2 = q[2]; y2 = q[3];
-            have_quad = 1;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            have_quad = 0;
-        }
-    }
-    if (have_quad) {
-        transition_log_write(
-            "%lu,%s,0x%08x,0x%08x,%.1f,%.1f,%.1f,%.1f,%s",
-            (unsigned long)seq,
-            (prim_id >= 0 && prim_id < SPRITE_PRIM_COUNT) ? kPrimNames[prim_id] : "?",
-            (unsigned)caller_va, (unsigned)ecx, x1, y1, x2, y2, action);
-    } else {
-        transition_log_write(
-            "%lu,%s,0x%08x,0x%08x,,,,,%s",
-            (unsigned long)seq,
-            (prim_id >= 0 && prim_id < SPRITE_PRIM_COUNT) ? kPrimNames[prim_id] : "?",
-            (unsigned)caller_va, (unsigned)ecx, action);
-    }
 }
 
 // ============================================================
@@ -5442,30 +4573,6 @@ static void hs_poke_f32(uint32_t va, float v)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-// Atomic-ish 5-byte E9 detour install: rel32 FIRST, opcode LAST, so
-// the render thread never sees a half-built jump. Guarded on the caller-supplied
-// stock first byte so an already-hooked site is left alone. Unused in P5 (no
-// in-game shim is installed — D4 body deferred); kept as the RE-APPLY-READY
-// primitive so the eventual D4 carrier drops in without re-deriving it.
-#if 0  /* P5: not installed — D4 body deferred, no in-game shim yet. */
-static int hs_patch_jmp(uint32_t site, uint8_t stock_first_byte, void *shim)
-{
-    uint8_t *p = (uint8_t *)(uintptr_t)site;
-    if (p[0] != stock_first_byte) return 0;        // already hooked OR unexpected
-    int32_t rel = (int32_t)((uintptr_t)shim - (uintptr_t)(site + 5));
-    DWORD old;
-    if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    p[1] = (uint8_t)(rel       & 0xFF);
-    p[2] = (uint8_t)((rel >> 8)  & 0xFF);
-    p[3] = (uint8_t)((rel >> 16) & 0xFF);
-    p[4] = (uint8_t)((rel >> 24) & 0xFF);
-    p[0] = 0xE9;                                    // opcode LAST -> atomic activation
-    DWORD tmp; VirtualProtect(p, 5, old, &tmp);
-    FlushInstructionCache(GetCurrentProcess(), p, 5);
-    return 1;
-}
-#endif
-
 // ---- Scene/gate globals ------------------------------
 #define HS_VA_PLAYER_ARRAY 0x00A94254u   // 12-slot in-game player array head
 #define HS_VA_SCENE_IDX    0x00AAFC9Cu   // G_SCENE_IDX (0 = front-end)
@@ -5585,37 +4692,6 @@ static void ingame_reassert_on_transition(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-// ---- D4 — pb_fix_bar install GATE (body deferred) -----------------------
-// Decided ONCE at apply time, same one-shot pattern as patch_rune_scale's
-// identity-skip: the in-game bar/glyph per-quad re-anchor detour is installed
-// ONLY when hud_scale != ~1.0. At 1.0 the detour is NEVER written -> the
-// 0x0082B440 prologue stays stock, so .text is byte-identical to today.
-//
-// RECONCILE: the char-create CCT MinHook on 0x0082B440 was DELETED
-// (char-create now owns its layout via the authoritative-source bake, no hook), so
-// 0x0082B440's prologue is byte-stock (0x83) again at apply time. THEREFORE: when
-// D4's body lands it may hs_patch_jmp the stock prologue directly — there is no CCT
-// detour left to coordinate with or to corrupt.
-//
-// BODY: deferred (documented TODO). The per-quad bar-unstretch / glyph re-anchor
-// is NOT implemented in P5.
-static int g_pb_fix_bar_enabled = 0;   // D4 gate; set at apply time, 1 only if hs != 1.0
-
-static void pb_fix_bar_install(void)
-{
-    const float hs = g_cfg.hud_scale;
-    if (hs > 0.999f && hs < 1.001f) {
-        g_pb_fix_bar_enabled = 0;          // 1.0: detour NEVER written -> byte-identical .text
-        log_line("[pb_fix_bar] D4 gate: hud_scale~=1.0 -> NOT installed (byte-identical at 1.0)");
-        return;
-    }
-    // hud_scale != 1.0: the gate is OPEN, but the BODY is deferred in P5 — no
-    // detour is installed yet. This records intent for the eventual D4 carrier.
-    g_pb_fix_bar_enabled = 1;
-    log_line("[pb_fix_bar] D4 gate: hud_scale=%.3f -> ENABLED (body deferred, no detour installed in P5)",
-             hs);
-}
-
 // apply_engine_patches — every code-flow detour (CALL-site rewrite, IAT thunk,
 // MinHook). Mechanism-classified, NOT by any anzz1/sodaboy label.
 static void apply_engine_patches(const ws_scale_ctx *s)
@@ -5627,9 +4703,6 @@ static void apply_engine_patches(const ws_scale_ctx *s)
     // Char-select 3D model pan: E8 redirect of the scene's ResetNPCCamera call.
     // World-space; survives PatchCharSelect=0 (orthogonal to the 2D layout).
     patch_charselect_model_pan();
-    // P5 D4: decide the in-game bar/glyph re-anchor install gate (body deferred).
-    // At hud_scale==1.0 NOTHING is installed -> byte-identical .text.
-    pb_fix_bar_install();
     // Char-create class-select layout: AUTHORITATIVE-SOURCE bake .
     // The two render-thread MinHooks (composer 0x0082BB74 + info-text 0x0082B440)
     // and their leaking negative gate are DELETED; every char-create content
@@ -5666,11 +4739,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         // logging is forced, every other gate/suppression path is byte-identical.
         g_cfg.debug_log = 1;
         resolve_log_path();
-        // Resolve the quest-transition capture log path (sibling of the
-        // main log). Capture file is opened lazily on first window open
-        // and truncated then; pre-resolving the path is the only attach-
-        // time prep needed for the capture system.
-        transition_resolve_log_path();
         // Truncate log on each launch so we don't accumulate noise.
         if (g_cfg.debug_log && g_cfg.log_path[0]) {
             DeleteFileA(g_cfg.log_path);
@@ -5765,12 +4833,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             log_line("[pso_widescreen] IAT patch FAILED — d3d8.dll!Direct3DCreate8 not found in psobb.exe import table");
         }
     } else if (reason == DLL_PROCESS_DETACH) {
-        // Final tally on detach so the user has a closing line in the log.
-        // sprite_log_final_tally is safe under DllMain detach because
-        // log_line uses CreateFile/WriteFile (no CRT init dep).
-        if (g_cfg.debug_log) {
-            sprite_log_final_tally("detach");
-        }
         if (g_cfg.boot_poster_enabled) {
             boot_poster_log_summary();
         }
@@ -5779,12 +4841,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             // never leave a zombie decoder on exit (Job KILL_ON_JOB_CLOSE
             // is the backstop; this is the clean path).
             mod_video_log_summary();
-        }
-        // Close the transition-capture log file if it was opened. Safe
-        // under DllMain detach for the same reason as the main log handle.
-        if (g_transition_log_handle != INVALID_HANDLE_VALUE) {
-            CloseHandle(g_transition_log_handle);
-            g_transition_log_handle = INVALID_HANDLE_VALUE;
         }
     }
     return TRUE;
