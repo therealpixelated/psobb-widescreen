@@ -6023,7 +6023,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         if (g_scale.enabled) {
             log_line("[pso_widescreen] apply: anzz1 authoritative coords + companions (one gate, no engine selector)");
             apply_static_patches(&g_scale);
-            apply_ephinea_layout();   // Ephinea-exact .data layout, 1:1 — overrides our pokes
             apply_engine_patches(&g_scale);
         }
         // d3d8.dll might already be loaded (pulled in via the static
