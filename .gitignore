@@ -1,0 +1,16 @@
+# build artifacts
+*.obj
+*.exe
+*.asi
+*.ilk
+*.pdb
+*.lib
+*.exp
+# scratch / logs
+_*
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
