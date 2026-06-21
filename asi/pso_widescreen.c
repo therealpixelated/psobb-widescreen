@@ -4334,7 +4334,11 @@ static float resolve_base(uint8_t base, const ws_scale_ctx *s)
         case B_RH:       return (float)s->render_h;
         case B_HUDSCALE: return s->hud_scale;
         case B_KX:       return s->hud_scale * ((16.0f / 9.0f) / (4.0f / 3.0f));
-        case B_AFFINEY:  return (s->render_h > 0) ? ((float)s->render_h / 480.0f) : 1.0f;
+        /* affine_y = render_h / design_h, where design_h is the HudScale-scaled
+           height C (=480*HudScale), NOT 480 — matches the original
+           patch_charselect_vertical (render_h / s->C). Using /480 over-scaled the
+           7 char-select details-pane rows by exactly HudScale (caught in verify). */
+        case B_AFFINEY:  return (s->C > 1.0f) ? ((float)s->render_h / s->C) : 1.0f;
         case B_ANATIVE:  return (s->hud_scale > 0.01f) ? (s->A / s->hud_scale) : s->A;
         case B_CNATIVE:  return (s->hud_scale > 0.01f) ? (s->C / s->hud_scale) : s->C;
         case B_LIT:
