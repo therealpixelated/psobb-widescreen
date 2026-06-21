@@ -5573,6 +5573,15 @@ static void ingame_reassert_on_transition(void)
             s_pending = 0;
         }
         s_prev_ig = ig;
+
+        /* clobber re-assert: a d3d8 wrapper or another ASI may re-init .data and
+           revert our design_w (0x0098A4B8) to stock 640.0. One read/frame; re-run
+           the whole table only on an actual revert (apply_bakes is idempotent). */
+        if (g_scale.enabled && g_scale.A != 640.0f &&
+            *(volatile float *)0x0098A4B8 == 640.0f) {
+            log_line("[ws] clobber: design_w reverted to 640 -> re-asserting kBakes");
+            apply_bakes(&g_scale);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
