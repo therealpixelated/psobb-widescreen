@@ -348,6 +348,12 @@ static struct {
     float minimap_vp_x;        // viewport origin X (design space).
     float minimap_vp_y;        // viewport origin Y.
     float minimap_zoom;        // engine zoom divisor (smaller = zoomed out).
+    // CUSTOM C3 — minimap corner nudge. ONE equal additive delta (design-space px)
+    // applied to BOTH minimap X layers AFTER the kBakes deanchor.full rows set them
+    // to their synced Ephinea positions: viewport X (0x00A11324) + background X
+    // (0x00A113E8). Equal delta on both keeps fg+bg locked (fixes the desync) while
+    // shifting the whole minimap toward the corner. Positive = right. INI: MinimapNudgeX.
+    float minimap_nudge_x;     // default +48.0 (push right toward the corner). 0 = no nudge.
     // REFACTOR: patch_phase3 (0x0082B440 splash inline hook),
     // patch_title_art (0x82BB74 push-imm sites) and patch_title_real /
     // title_real_mode (the 8 imm32 0x006f4cf2..0x006f4d66 rewrites) are
@@ -594,6 +600,7 @@ static void load_config(void)
     g_cfg.minimap_vp_x        = 772.33f;
     g_cfg.minimap_vp_y        =  83.0f;
     g_cfg.minimap_zoom        =  0.53f;
+    g_cfg.minimap_nudge_x     =  48.0f;   // C3: nudge minimap right toward the corner.
     g_cfg.patch_flare_scale   = 0;     // 2026-05-26: opt-in (default OFF) until
                                        // in-game effect-type-0 safety is checked.
     g_cfg.flare_scale         = 6.0f;  // 1.5× of the stock 4.0 descriptor scale.
@@ -754,6 +761,7 @@ static void load_config(void)
             float z = (float)atof(val);
             if (z >= 0.1f && z <= 3.0f) g_cfg.minimap_zoom = z;
         }
+        else if (_stricmp(key, "MinimapNudgeX")     == 0) g_cfg.minimap_nudge_x = (float)atof(val);
         else if (_stricmp(key, "PatchFlareScale")   == 0) g_cfg.patch_flare_scale = atoi(val);
         else if (_stricmp(key, "FlareScale")        == 0) {
             float s = (float)atof(val);
@@ -1285,122 +1293,13 @@ static void ingame_reassert_on_transition(void);
 // request() = the engine's scene-request post @0x007A60DC (cdecl, 1 int arg:
 // the requested scene id; writes [0xAAB388]=N, [0xAAB394]=1; the pump then sets
 // [0xAAB384]=N). request(2) stages scene 2 (TITLE).
-// ---- FIX A: char-create class-info DESCRIPTION-text X pin (scene-5 gated) -----
-// The class-info description text ("Proficient with bladed weapons…" / "Ranger /
-// Human / Male…") is drawn by the char-create category/class radial-menu widget
-// render (0x004F4E94) via RenderText3D. Its design-X is a single inline immediate:
-// at 0x004F4FA2 `mov dword [esp],0x439D8000` (=315.0f); the 4 float bytes sit at
-// 0x004F4FA5 (stock LE = 00 80 9D 43 = 315.0f). The info BOX rides the composer
-// +160 stride but this text does NOT (it bypasses the composer), so it orphans
-// center-left. We move it +160 (design space) to ride into the box.
 //
-// ONE-TIME EARLY BAKE (was a scene-gated per-frame poke; changed 
-// the old code poked 315->475 every frame while scene[0x00AAB384]==5 from inside
-// Present, which runs AFTER the frame is already rendered. So the FIRST char-
-// create frame still drew the text at the OLD 315 (wrong spot) and only the NEXT
-// frame showed 475 — the user-visible "text loads in a different spot initially".
-//
-// We now bake the widescreen value ONCE, on the first Present frame where the
-// design width is readable as widescreen (design_w > 640), which lands long
-// BEFORE char-create is ever reached (first frame after device/resolution init).
-// So the very first char-create render is already at 475 — no first-frame flash,
-// and NO per-frame writes (race-free). Live tests showed 0x004F4FA5 is the class-
-// description X and poking it moves nothing in the dressing room / elsewhere
-// (isolated single inline imm), so a permanent widescreen bake is safe; there is
-// nothing to restore on leave, so the per-frame restore is gone too. At true 4:3
-// (design_w <= 640) we do nothing and leave the stock 315.0.
-// hs_peek_f32 is defined far below; forward-declare it here so the
-// design_w read isn't implicit-int (mirrors the decl at the startup-bake block).
-static float hs_peek_f32(uint32_t va);
-
-// Bidirectional value-guarded .text float writer. UNLIKE cc_poke_imm_f32 (which
-// has an `if(*p!=stock)return` precondition that blocks restoring a non-stock
-// site), this writes whenever the current value differs from the target — so it
-// can both POKE the char-create value and RESTORE 315.0. VirtualProtect RW around
-// the 4-byte store, restore protection, all under SEH. Idempotent: no write when
-// already at the target.
-static void cc_text_force_f32(uint32_t va, float v)
-{
-    volatile float *p = (volatile float *)(uintptr_t)va;
-    __try {
-        if (*p == v) return;            // value-guard: already correct, no write
-        DWORD old;
-        if (!VirtualProtect((LPVOID)(uintptr_t)va, 4, PAGE_EXECUTE_READWRITE, &old)) return;
-        *p = v;
-        DWORD tmp; VirtualProtect((LPVOID)(uintptr_t)va, 4, old, &tmp);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
-
-#define CC_TEXT_DESC_X_VA  0x004F4FA5u   // imm32 float operand of `mov [esp],315.0` @0x004F4FA2
-// SECOND text lever the prior bake MISSED (RE workflow wolxzzbol): the inner
-// 5-column pen-X base, a .data float at 0x0091E3F4 (stock 315.0f) read once at
-// 0x004F503C feeding RenderText3D at 0x004F5053. Same char-create class-info
-// widget (sub_004F4E94). Baking ONLY 0x004F4FA5 left these rows at 315 while the
-// title line moved to 475 -> the "rows load in a different spot" misalignment.
-// Bake it in lockstep with the identical stride. .data = writable (no protect
-// flip needed; cc_text_force_f32's VirtualProtect is a harmless no-op there).
-#define CC_TEXT_DESC_X2_VA 0x0091E3F4u
-
-// Char-create class-description TEXT right-pane horizontal-shift knob. Shifts the
-// description text right by CC_RIGHTPANE_X_FACTOR*(design_w-640) so it stays centered
-// in the (statically widened) right pane. (The old companion info-box splice that
-// shared this factor is removed — Ephinea applies no box-shift; the text bake stays.)
-// Text rides RenderText3D 0x0082b54f -> RenderUIQuad 0x0082B440 (applies the affine).
-#define CC_RIGHTPANE_X_FACTOR 0.40f   // right-pane text shift = factor*(design_w-640)
-                                      // reduced 0.60->0.40 — the prior value strode
-                                      // too far right (big empty gap from the class list).
-
-// Scale-INVARIANT right-pane stride , owner: "same gap at 1.0 as 2.0").
-// design_w (0x0098A4B8) = 853.333 * HudScale, so the raw span (design_w-640) GROWS with
-// HudScale: 213 @hs1.0 but 1067 @hs2.0 -> the info box strode 5x further right at 2.0,
-// blowing the class-list<->pane gap wide open. Key the shift to the UNIT-scale design
-// width (design_w / HudScale = 853.33 @16:9, CONSTANT at every HudScale) so the shift is
-// the SAME number of DESIGN px at 1.0/1.5/2.0. The affine then scales the whole layout
-// uniformly => the class-list<->info-pane gap is proportionally identical at every scale.
-// Only the class-description text uses this stride now (the box-shift splice is gone).
-static float cc_rightpane_offset(float dw)
-{
-    float s = g_cfg.hud_scale;
-    float dw_unit = (s > 0.01f) ? (dw / s) : dw;   // 853.33 @16:9 at ANY HudScale
-    if (dw_unit < 640.0f) dw_unit = 640.0f;        // never negative span (4:3 safety)
-    return CC_RIGHTPANE_X_FACTOR * (dw_unit - 640.0f);
-}
-
-// One-shot early bake: on the first Present frame where design_w reads widescreen
-// (> 640), bake the description-text X immediate to 315 + factor*span ONCE, then
-// never write again (g_cc_text_baked guard). This lands long before char-create is
-// reached, so its first render is already at the correct X (no first-frame flash).
-// At true 4:3 (design_w <= 640) do nothing — leave the stock 315.0. The stride
-// matches the info box's design-space stride at all HudScales (the box splice uses
-// the SAME CC_RIGHTPANE_X_FACTOR). No per-frame poke, no restore-on-leave (the bake
-// is permanent + safe: 0x004F4FA5 is the isolated class-description X, proven inert
-// elsewhere).
-static int g_cc_text_baked = 0;     // 0 = not yet baked, 1 = baked (never writes again)
-static void cc_text_early_bake(void)
-{
-    if (g_cc_text_baked) return;    // already baked once — pure no-op thereafter
-    __try {
-        float dw = hs_peek_f32(0x0098A4B8u);   // design_w: 853.33 @16:9 hs1.0, 640 @4:3, 1280 @hs1.5
-        if (dw > 640.0f) {
-            // Stride keyed to design_w (CC_RIGHTPANE_X_FACTOR*span) so the description
-            // text stays centered in the statically widened right pane. Bake BOTH
-            // description-text X levers in lockstep so the title line (0x004F4FA5 .text)
-            // and the inner rows (0x0091E3F4 .data) move together — fixing the prior
-            // single-lever misalignment. Both feed RenderText3D -> RenderUIQuad
-            // 0x0082B440 (applies the affine itself), NOT the composer 0x0082BB74, so
-            // the static write fully positions them with zero per-frame cost and no flicker.
-            float cc_desc_x = 315.0f + cc_rightpane_offset(dw);   // scale-invariant stride
-            cc_text_force_f32(CC_TEXT_DESC_X_VA,  cc_desc_x);   // 0x004F4FA5 (.text imm32)
-            cc_text_force_f32(CC_TEXT_DESC_X2_VA, cc_desc_x);   // 0x0091E3F4 (.data float)
-            g_cc_text_baked = 1;
-            log_line("[cc_text] early bake desc-X 0x4F4FA5+0x91E3F4 = %.1f (dw=%.1f)", cc_desc_x, dw);
-        }
-        // dw not yet widescreen-readable (pre-device init): leave g_cc_text_baked
-        // 0 so a later frame bakes it. dw <= 640 true-4:3 also leaves it 0 (nothing
-        // to bake) — harmless: the loop just keeps reading the .data load each frame
-        // until widescreen, or forever at 4:3 (a single compare + branch).
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
+// REMOVED (Ephinea-fidelity pass): the char-create class-DESCRIPTION-text X bake
+// (cc_text_force_f32 / cc_rightpane_offset / cc_text_early_bake, the macros
+// CC_TEXT_DESC_X_VA 0x004F4FA5 + CC_TEXT_DESC_X2_VA 0x0091E3F4 + CC_RIGHTPANE_X_FACTOR,
+// the g_cc_text_baked guard, and the local hs_peek_f32 fwd-decl). Ephinea's patchset
+// does NOT touch 0x004F4FA5 or 0x0091E3F4 — both stay stock 315.0. The Present-driven
+// call site is removed too.
 
 // Present (slot 15) — render the boot poster ONTO the current backbuffer
 // before the engine flips it. The boot_poster module checks its own
@@ -1410,15 +1309,8 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
     IDirect3DDevice8 *self, const RECT *pSrc, const RECT *pDst,
     HWND hOverride, void *pDirtyRegion)
 {
-    // FIX A — one-shot early bake of the char-create description-text X. Fires
-    // ONCE on the first frame design_w reads widescreen (long before char-create),
-    // then self-retires to a single compare+branch. NOT a per-frame poke, so the
-    // first char-create frame is already at the correct X (no "loads in a different
-    // spot initially" flash). SEH-firewalled so it can never throw into Present.
-    __try {
-        cc_text_early_bake();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
+    // (FIX-A char-create description-text bake REMOVED — Ephinea-fidelity pass.
+    // 0x004F4FA5 / 0x0091E3F4 stay stock 315.0; no Present-driven text poke.)
     __try {
         boot_poster_on_present((void *)self, g_last_vp_w, g_last_vp_h);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2001,231 +1893,25 @@ static float ui_coord(float design)
 }
 
 // ============================================================
-// CHAR-CREATE HEX BACKDROP 16:9 FILL — add tile column(s) at the function tail
-// (RenderChallengePanelBackground_004ed008), NOT a per-frame composer poke.
+// CHAR-CREATE HEX BACKDROP 16:9 FILL — REMOVED (Ephinea-faithful rework).
 // ============================================================
-// PROBLEM: char-create's hex backdrop is drawn by
-// RenderChallengePanelBackground_004ed008 as 8 tiles over two STATIC position
-// tables (0x0091DBE0 = 6 tiles ids 12..17; 0x0091DBD0 = 2 tiles ids 12,13).
-// Columns are contiguous in design space: X=0 W256 ->0..256, X=256 W128 ->256..384,
-// X=384 W256 ->384..640. The backdrop therefore covers only design X 0..640 (=screen
-// 0..1440 at 16:9 hs1.0), leaving the right ~25% dark. The composer applies the 2D
-// affine (x2.25); tile WIDTH is the shared global [0x00A7221C] so scaling positions
-// (live-proven by the parent) opens GAPS, and the per-tile Xscale imm @0x004E9D0F is
-// SHARED with the title bar — both are the wrong lever.
-//
-// FIX (this code): after the engine's own two loops finish, emit ADDITIONAL static-
-// positioned tiles at design X=640, 896, ... (each W256, contiguous, no gaps) until
-// the columns cover design_w. This reuses ids 12 & 13 (W=256, Y=0 and Y=256) — the
-// SAME ids the engine already renders this frame, so the per-id UV/size record at
-// 0x009B76E0[id] is provably valid — and calls the engine's own
-// SetChallengePanelScale_004e9ce8 with a {X,Y} struct shaped exactly like the
-// engine's 8-byte table entries (the loops stride ebx by 8 => the position struct is
-// exactly {float X, float Y}; width/UV come from 0x009B76E0[id], NOT this struct).
-// Because we drive the engine's own emit path with a static struct, these are static
-// background tiles — NOT a per-frame value-poke. No flicker.
-//
-// SPLICE: 0x004ed06d, the `call 0x004D28A4` (E8 32 58 FE FF, exactly 5 bytes) that
-// runs immediately AFTER both loops and BEFORE the base-fill globals block at
-// 0x004ed072. At this point esp is balanced to the function frame (every loop call
-// did `add esp,0xC`) and no GP register is live across the call (sub_004D28A4 loads
-// its own absolute addrs 0xA48820/0xA487C0 and is register-independent; the base-fill
-// block re-loads everything fresh). We E9 to a stub that emits the extra column(s)
-// then jmps a trampoline that RE-ISSUES the original call (with a correctly relocated
-// rel32 — a verbatim byte-copy of an E8 would mis-relocate) and E9s back to 0x004ed072.
-//
-// GATES (runtime, in the handler — the .text splice is always present but inert):
-// (1) screen-id [0x00A165F0] == 12  => char-create only (NOT Challenge mode, which
-// also reaches this "ChallengePanel" framework). 4:3 char-create still no-ops
-// via gate (2).
-// (2) design_w (hs_peek_f32 0x0098A4B8) > 640  => 4:3 (640) is a hard no-op (no
-// extra columns emitted), matching the rest of the front-end-bake no-op-at-4:3
-// convention.
-// The column count is data-driven on design_w, so HudScale 1.5 (design_w 1280)
-// naturally adds more columns (X=640, 896, 1152) to fill its wider design space.
-
-// RE-DERIVED, then RE-CORRECTED from the LIVE disasm + scrim geometry:
-// RenderChallengePanelBackground_004ed008 draws in this order:
-// [tile loop1 ids12..17] [tile loop2 ids12..13]  -> native backdrop tiles, X 0..640
-// 0x004ED06D  call 0x004D28A4 (update_viewport)  -> our CLEAN splice point
-// 0x004ED103  call 0x0082B5D8 (SCRIM A, X 140..384, alpha 0->255 gradient fade-in)
-// 0x004ED16E  call 0x0082B5D8 (SCRIM B, X 384..design_w, alpha 255->236 near-black)
-// 0x004ED176  call 0x004D2968 (unknown_ui_viewport) ... depth/state restore ... ret
-// The native tiles cover X 0..640 contiguously (col@0 big id12/13, col@256 narrow
-// id14..17 stack, col@384 big id12/13). The ONLY hole is X 640..design_w (the right
-// ~213px at hs1.0): no tile there, so the near-black scrim B composites over raw
-// background = the "dark gap" the user sees. Scrim B's right edge is already widened
-// to design_w by our startup bake (verified live: verts 0x9B8DC4/DDC = 853.33), so it
-// DOES cover the hole -- the hole just has nothing teal underneath it.
-// FIX (clean, engine-native): splice at 0x004ED06D, i.e. AFTER the tile loops but
-// BEFORE both scrims, and emit extra big tiles id12(top,Y=0)+id13(bottom,Y=256) at the
-// natural 256-wide grid step from X=640 to design_w. Because they emit in the SAME
-// phase as the engine's own tiles, both scrims composite over them IDENTICALLY -> the
-// fill is indistinguishable from a native column. No overlap (step == tile width), no
-// copy-paste, no scrim edit. Challenge mode (shares this fn) stays byte-identical off
-// char-create via the screen-id gate; 4:3 no-ops via the design_w>640 gate.
-#define CC_BACKDROP_SPLICE_VA   0x004ED06Du     // call 0x004D28A4 (after tiles, BEFORE both scrims)
-#define CC_BACKDROP_SPLICE_LEN  5
-#define CC_BACKDROP_RESUME_VA   0x004ED072u     // first byte after the spliced call
-#define CC_SETSCALE_VA          0x004E9CE8u     // SetChallengePanelScale_004e9ce8
-#define CC_SUB_004D28A4_VA      0x004D28A4u     // the original call target (re-issued)
-#define CC_SCREENID_VA          0x00A165F0u     // front-end screen id (char-create=12)
-#define CC_DESIGNW_VA           0x0098A4B8u     // design_w (anzz1-owned); FE = 853.33
-#define CC_DESIGNH_VA           0x0098A4B4u     // design_h (anzz1-owned); FE = 480 (960 @hs2.0)
-#define CC_TILE_W               256.0f          // big tile width = natural grid step (NO overlap)
-#define CC_DEPTH                0xC61B3C00u     // the depth arg the engine passes (-9935.0f)
-#define CC_EXTRA_ID_TOP         12              // top tile id (Y=0),   big teal hex
-#define CC_EXTRA_ID_BOT         13              // bottom tile id (Y=256), big teal hex
-// Begin the fill at passed-X 256. The LOOP2/fill render path adds a CONSTANT +128
-// design-X offset (proven via draw_capture: passed 384->render 512, passed 640->render
-// 768), so passed 256 lands at render 384 -- exactly where the solid LOOP1 coverage
-// (render 0..384) ends. In widescreen the engine pushes its own LOOP2 column from the
-// 4:3 spot (render 384..640) to render 512..768, opening a GAP at render 384..512; our
-// fill columns at passed 256/512/768 -> render 384/640/896 cover that internal gap AND
-// the right-edge gap (render 768..design_w) in one gapless, grid-aligned sweep.
-#define CC_FILL_X_START         256.0f          // passed-X start (+128 path offset -> render 384)
-#define CC_EXTRA_COL_MAX        12              // safety cap on emitted extra columns
-
-// cdecl signature of SetChallengePanelScale_004e9ce8: (int id, float depth_bits,
-// const float *pos_xy). depth is pushed as raw 32 bits (the engine pushes the
-// imm 0xC61B3C00); we pass it as a float-typed arg whose bit pattern is identical.
-typedef void (__cdecl *PFN_set_challenge_scale)(int id, unsigned int depth, const float *pos_xy);
-
-// ASI-owned static position structs, each shaped EXACTLY like the engine's 8-byte
-// {float X, float Y} table entries. X is set per-column at emit time; Y is fixed
-// (top column tile Y=0, bottom column tile Y=256), matching ids 12/13 in the
-// engine's own LOOP2 table 0x0091DBD0 = (384,0)(384,256).
-static float g_cc_col_top[CC_EXTRA_COL_MAX][2];   // {X, 0}
-static float g_cc_col_bot[CC_EXTRA_COL_MAX][2];   // {X, 256}
-
-static uint8_t  g_cc_backdrop_orig[CC_BACKDROP_SPLICE_LEN] = {0};
-static void    *g_cc_backdrop_tramp = NULL;       // RWX: re-issue call + E9 resume
-static int      g_cc_backdrop_installed = 0;
-static LONG     g_cc_backdrop_emit_n = 0;         // diag: emit invocations
-
-// Handler — runs once per RenderChallengePanelBackground call (i.e. once per
-// char-create / Challenge-mode backdrop draw). Gated; emits the extra column(s).
-// __try-wrapped: a fault here must never crash the render thread.
-static void __stdcall cc_backdrop_emit(void)
-{
-    __try {
-        const int screen_id = *(volatile int32_t *)(uintptr_t)CC_SCREENID_VA;
-        if (screen_id != 12) return;                 // char-create only
-        const float dw = hs_peek_f32(CC_DESIGNW_VA);
-        if (dw <= 640.0f) return;                    // 4:3 hard no-op
-
-        PFN_set_challenge_scale set_scale =
-            (PFN_set_challenge_scale)(uintptr_t)CC_SETSCALE_VA;
-
-        // The engine's solid LOOP1 coverage ends at render X=384; LOOP2 (its right
-        // column) sits at render 512..768 in widescreen, leaving TWO holes: the internal
-        // 384..512 and the right edge 768..design_w. We run BEFORE the two scrims, so each
-        // extra tile is darkened by scrim B exactly like the engine's own LOOP2 column ->
-        // the fill is indistinguishable from a native column. Emit big tiles
-        // id12(top,Y=0)+id13(bottom,Y=256) on the natural 256-wide grid from passed-X 256
-        // (render 384) up to design_w. Passed 256/512/768 -> render 384/640/896 at hs1.0;
-        // step == tile width => abutting, NO overlap and NO gap, full height per column.
-        int cols = 0;
-        for (float x = CC_FILL_X_START; x < dw && cols < CC_EXTRA_COL_MAX;
-             x += CC_TILE_W) {
-            g_cc_col_top[cols][0] = x;   g_cc_col_top[cols][1] = 0.0f;
-            g_cc_col_bot[cols][0] = x;   g_cc_col_bot[cols][1] = 256.0f;
-            set_scale(CC_EXTRA_ID_TOP, CC_DEPTH, g_cc_col_top[cols]);
-            set_scale(CC_EXTRA_ID_BOT, CC_DEPTH, g_cc_col_bot[cols]);
-            ++cols;
-        }
-        if (g_cfg.debug_log && g_cfg.debug_log_verbose) {
-            LONG n = InterlockedIncrement(&g_cc_backdrop_emit_n);
-            if (n <= 8)
-                log_line("[pso_widescreen] cc-backdrop: +%d col(s) from X=256 (dw=%.1f)",
-                         cols, dw);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { }
-}
-
-// Naked stub: preserve all GP regs + flags, call the emitter, then jmp the
-// trampoline (which re-issues the original `call 0x004D28A4` and resumes at
-// 0x004ed072). The emitter is __stdcall (cleans its own 0 args); SetChallengePanelScale
-// is cdecl and the emitter balances those pushes itself, so esp is intact on return.
-__declspec(naked) static void cc_backdrop_stub(void)
-{
-    __asm {
-        pushad
-        pushfd
-        call  cc_backdrop_emit
-        popfd
-        popad
-        jmp   dword ptr [g_cc_backdrop_tramp]
-    }
-}
-
-// Install the tail-splice. Sig-guarded (refuses unless the stock E8-call bytes are
-// present) and idempotent (installed-flag + sig check). The trampoline is built
-// manually (the saved prologue is not byte-copied) because the spliced instruction
-// is a relative E8 call that must be RE-ENCODED at the trampoline's address.
-static void cc_backdrop_install(void)
-{
-    if (g_cc_backdrop_installed) return;
-    // Stock bytes at 0x004ED06D: E8 32 58 FE FF = call 0x004D28A4 (re-issued by tramp).
-    static const uint8_t kExpected[CC_BACKDROP_SPLICE_LEN] = {
-        0xE8, 0x32, 0x58, 0xFE, 0xFF
-    };
-    const uint8_t *p = (const uint8_t *)(uintptr_t)CC_BACKDROP_SPLICE_VA;
-    for (int i = 0; i < CC_BACKDROP_SPLICE_LEN; ++i) {
-        if (p[i] != kExpected[i]) {
-            log_line("[pso_widescreen] cc-backdrop: splice sig mismatch byte %d: "
-                     "got 0x%02x expected 0x%02x — refusing to hook", i, p[i], kExpected[i]);
-            return;
-        }
-        g_cc_backdrop_orig[i] = p[i];
-    }
-    // Trampoline (RWX): re-issue the original call (correctly relocated) then E9 back.
-    // [0]  E8 <rel32 -> 0x004D28A4>
-    // [5]  E9 <rel32 -> 0x004ED072>
-    void *page = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE,
-                              PAGE_EXECUTE_READWRITE);
-    if (!page) {
-        log_line("[pso_widescreen] cc-backdrop: trampoline alloc FAILED err=%lu",
-                 GetLastError());
-        return;
-    }
-    uint8_t *t = (uint8_t *)page;
-    t[0] = 0xE8;
-    int32_t rel_call = (int32_t)(CC_SUB_004D28A4_VA - ((uintptr_t)t + 5));
-    memcpy(t + 1, &rel_call, 4);
-    t[5] = 0xE9;
-    int32_t rel_resume = (int32_t)(CC_BACKDROP_RESUME_VA - ((uintptr_t)t + 10));
-    memcpy(t + 6, &rel_resume, 4);
-    g_cc_backdrop_tramp = page;
-
-    // Write the E9 splice at 0x004ED06D (exactly 5 bytes == the original call's length,
-    // so no NOP padding is needed).
-    DWORD old_prot = 0;
-    if (!VirtualProtect((LPVOID)(uintptr_t)CC_BACKDROP_SPLICE_VA, CC_BACKDROP_SPLICE_LEN,
-                        PAGE_EXECUTE_READWRITE, &old_prot)) {
-        log_line("[pso_widescreen] cc-backdrop: VirtualProtect FAILED err=%lu", GetLastError());
-        return;
-    }
-    uint8_t patch[CC_BACKDROP_SPLICE_LEN];
-    patch[0] = 0xE9;
-    int32_t rel_to_stub = (int32_t)((uintptr_t)&cc_backdrop_stub - (CC_BACKDROP_SPLICE_VA + 5));
-    memcpy(patch + 1, &rel_to_stub, 4);
-    memcpy((void *)(uintptr_t)CC_BACKDROP_SPLICE_VA, patch, CC_BACKDROP_SPLICE_LEN);
-    DWORD tmp = 0;
-    VirtualProtect((LPVOID)(uintptr_t)CC_BACKDROP_SPLICE_VA, CC_BACKDROP_SPLICE_LEN, old_prot, &tmp);
-    FlushInstructionCache(GetCurrentProcess(),
-                          (LPCVOID)(uintptr_t)CC_BACKDROP_SPLICE_VA, CC_BACKDROP_SPLICE_LEN);
-    g_cc_backdrop_installed = 1;
-    log_line("[pso_widescreen] cc-backdrop hex-fill armed @ 0x%08x -> stub 0x%p tramp 0x%p",
-             (unsigned)CC_BACKDROP_SPLICE_VA, (void *)&cc_backdrop_stub, g_cc_backdrop_tramp);
-}
+// The former cc_backdrop_emit tail-splice at 0x004ED06D (a per-frame emit of
+// extra 256px-stepped columns) is GONE. Ephinea has no such splice: its entire
+// char-create dressing-room backdrop model is the 24 ×(renderH/480 == ×hud_scale)
+// .data tiles (12 vec2f positions @0x0091DBxx + 12 u16 W/H shorts @0x009B77xx)
+// now declared as SRC_EPHINEA / GATE_CHARSELECT rows in kBakes[]. The hardcoded
+// 256px column step was MUTUALLY EXCLUSIVE with H-scaling the tiles (×2 tiles at
+// HudScale 2.0 would overlap the fixed step), so the splice was deleted to match
+// Ephinea 1:1. See the "SRC_EPHINEA char-create dressing-room tiles" block in
+// kBakes[].
 
 // REMOVED: char-create class-info-box right-shift + hex-backdrop stretch splice
 // (cc_box_x_* / cc_box_y_*). Ephinea applies NO per-draw RenderChallengePanelElement
 // splice and NO tile scaling for char-create; its delta is the static design-width
 // widenings + honeycomb-frame + right-gradient widths/colors in kBakes[]. Deleted to
-// match Ephinea 1:1. (cc_rightpane_offset / CC_RIGHTPANE_X_FACTOR are KEPT — still used
-// by the char-create description-text bake cc_text_early_bake.)
+// match Ephinea 1:1. (The char-create description-text bake — cc_rightpane_offset /
+// CC_RIGHTPANE_X_FACTOR / cc_text_early_bake — is also REMOVED; Ephinea leaves
+// 0x004F4FA5 + 0x0091E3F4 stock 315.0.)
 
 // REFACTOR: RETIRED with the Sodaboy path —
 // HUD_VANILLA / REF_W / REF_H (dead Sodaboy HUD-rect reference),
@@ -2381,6 +2067,9 @@ __declspec(naked) static void rb_deanchor_shim(void)
 // captured g_scale would be both the wrong magnitude AND stale). Faithful port of
 // FUN_52da6e50: pillarbox (renderW/renderH < 4/3) scales by width + centers
 // vertically; else (16:9-wide, our case) scales by height + centers horizontally.
+// hs_peek_f32 is defined far below; forward-declare it here (first use in the file)
+// so the design_w/h reads aren't implicit-int. (Mirrors the decl before apply_bakes.)
+static float hs_peek_f32(uint32_t va);
 static void __cdecl ks_hexfit_transform(float *vptr, int n)
 {
     if (!vptr || n <= 0) return;
@@ -2558,6 +2247,58 @@ static int lw_yanchor_redirect(void)
 // gone. Char-create is owned entirely by the static apply_startup_bakes() pass
 // (.text imm32 + .rdata float rewrites, value-guarded) plus stock geometry; the
 // runtime-only class-select content rows are intentionally not strided.
+
+// ============================================================
+// OVER-HEAD PLAYER NAME-LABEL SCALER — Ephinea FUN_52dc4f60 port.
+// ============================================================
+// The last un-ported Ephinea VISUAL per-draw detour. The stock floating name-tag
+// glyph quad (drawn by RenderJapaneseCharacterName_0078a1f8 via the single
+// `call 0x007AB554` = unknown_render_text3(x,y,text,color,float scale,draw,flag))
+// does NOT pick up the engine's per-pass 2D design-anchor affine (0x00ACC0E8/EC),
+// so the name renders small in widescreen. Ephinea's FUN_52dc4f60 detours THAT one
+// call site and multiplies the glyph SCALE by the live affine when it is >1.0,
+// forwarding to its own glyph reimpl. We reproduce it faithfully without any Ephinea
+// code: pre-multiply the cdecl `scale` arg (arg4, at [esp+0x14] once the call has
+// pushed its return addr) by the live affine, then tail-JMP into the STOCK renderer
+// with args + return intact. SCOPE: name tags ONLY — it touches the CALL SITE, not
+// the shared 0x007AB554 callee, so chat/menu text is untouched. General HUD scaling
+// is the engine's own per-pass affine + the cascade anchors (correct post-prune;
+// we do NOT force-write the affine — that caused the lobby black bars). Guard:
+// scale only when BOTH SCALE_X and SCALE_Y exceed 1.0 (a design-space pass); at 4:3
+// and on screen-space passes the affine is 1.0 -> byte-identical no-op. The scale is
+// a per-call stack value (no global), so there is nothing to save/restore.
+__declspec(naked) static void nm_name_scale_shim(void)
+{
+    __asm {
+        // entry: [esp]=ret [esp+4]=x [esp+8]=y [esp+0xC]=text [esp+0x10]=color
+        //        [esp+0x14]=scale(float) [esp+0x18]=draw [esp+0x1C]=flag   (cdecl)
+        mov   eax, dword ptr ds:[0x00ACC0E8]       // SCALE_X raw float bits
+        cmp   eax, 0x3F800000                      // vs 1.0f (positive floats: bits monotonic with value)
+        jbe   nm_pass                              // SCALE_X <= 1.0 -> identity (4:3 / screen-space)
+        mov   eax, dword ptr ds:[0x00ACC0EC]       // SCALE_Y raw float bits
+        cmp   eax, 0x3F800000
+        jbe   nm_pass                              // SCALE_Y <= 1.0 -> identity
+        fld   dword ptr [esp + 0x14]               // glyph scale arg (arg4)
+        fmul  dword ptr ds:[0x00ACC0E8]            // *= SCALE_X (== SCALE_Y, square-pixel build)
+        fstp  dword ptr [esp + 0x14]               // write back in place
+    nm_pass:
+        mov   eax, 0x007AB554
+        jmp   eax                                  // tail-enter stock renderer; args + ret intact
+    }
+}
+
+// patch_name_label_scaler — boot CALL-site redirect of 0x0078A300 to our shim.
+// redirect_call validates the site is `call 0x007AB554`, so a non-matching build is
+// left untouched (no brick). Always installed (Ephinea-faithful); no-op at 4:3.
+static int patch_name_label_scaler(void)
+{
+    if (!redirect_call(0x0078A300u, 0x007AB554u, (void *)&nm_name_scale_shim)) {
+        log_line("[pso_widescreen] name-label scaler: SKIP (redirect failed)");
+        return 0;
+    }
+    log_line("[pso_widescreen] name-label scaler (FUN_52dc4f60 port) installed @0x0078A300");
+    return 1;
+}
 
 // Char-select 3D MODEL pan — SEPARATE from patch_charselect_layout so it survives
 // PatchCharSelect=0 (the 2D-UI patch overstretches at HUDScale 1.0 and is gated
@@ -2931,19 +2672,13 @@ static void apply_startup_bakes(int render_w)
         return;
     }
     const float dw       = hs_peek_f32(0x0098A4B8u);   // design_w  (anzz1-owned, set first)
-    const float a_plus_10 = dw + 10.0f;                 // 863.333 @16:9, 650.0 @4:3 (==stock no-op)
-    const float span      = dw - 640.0f;                // 213.33 @16:9 hs1.0 ; 0.0 @4:3 (HARD no-op key)
     // (char-create content-row stride is RUNTIME-ONLY with no static source -> NOT
     // baked and NOT strided; the per-frame hook that used to move it was deleted
     // per the no-per-frame-patching mandate. See the Scene-09 note below.)
 
-    // ---- Scene 02: Login / Start menu ctor SEED copies (the 3 MISSED right-edge
-    // anchors). anzz1 baked the animation-RESEED copies (0x7584EE/51F = A+10) but
-    // never the ctor SEEDs -> at 16:9 the slide-in lerps from a stale design-650
-    // toward 863, a visible pop / wrong rest-frame. Right (A+10) class. 4:3-safe.
-    cc_poke_imm_f32(0x007583C1u, 650.0f, a_plus_10);          // menu primary X1   (mov [edx+0x1c])
-    cc_poke_imm_f32(0x007583F3u, 650.0f, a_plus_10);          // menu secondary X2 (mov [edx+0x2c])
-    cc_poke_imm_f32(0x0075840Bu, 650.0f, a_plus_10);          // menu anim-target  (mov [edx+0x34])
+    // ---- Scene 02 login-menu ctor SEED X bakes (0x007583C1/F3/40B) REMOVED ----
+    // Ephinea's patchset does not seed these; they are left stock (the TASK-A
+    // kBakes rows for the same VAs are also deleted). No boot dup remains.
 
     // ---- Scene 09 char-create bake: the 4 MISTARGETED WordSelect writes are GONE ----
     // The old writes here (0x006FFD80->[0xA96D60], 0x006FFCEA->[0xA96DA0],
@@ -2985,23 +2720,11 @@ static void apply_startup_bakes(int render_w)
     // ChallengeObjectSubPanel bakes, which Live draw_capture proved did NOT move the
     // box — every element reads its X from a HEAP struct [ebx]) are both removed.
 
-    // ---- F_VPRESET in-game 2D-affine SCALE_X/Y source bakes (16:9 in-game wide-fill)
-    // F_VPRESET (0x0082F5D8) stamps the in-game 2D affine (0x00ACC0E8/EC) back to a
-    // HARDCODED 1.0 immediate on the front-end->in-game transition, and W1 (the
-    // derived FE writer at 0x0082F309) is DEAD in-game — so without this the HUD
-    // renders at design_w geometry but 1.0 scale (under-fills 16:9). Patch the two
-    // imm32 operands to render_w/design_w so in-game fills the wide canvas.
-    // ig_aff = render_w / dw : 2.25 @hs1.0(16:9), 1.5 @hs1.5, 1.0 @4:3(render_w==dw==640)
-    // FE-SAFE asymmetry: on the front-end W1 re-derives the correct value every
-    // frame and WINS (the patched F_VPRESET value is harmlessly overwritten); only
-    // in-game (where W1 is dead) does the patched value hold. 4:3 is a value-guarded
-    // no-op (ig_aff==1.0==stock -> cc_poke_imm_f32's `*p==v` guard fires). The
-    // immediate .text edit SURVIVES the transition wipe (only code-flow detours get
-    // reverted), so no worker / scene gate is needed for the affine itself. See
-    //
-    const float ig_aff = (dw > 0.0f) ? ((float)render_w / dw) : 1.0f;
-    cc_poke_imm_f32(0x0082F8F4u, 1.0f, ig_aff);   // F_VPRESET SCALE_X imm (mov [0x00ACC0E8],imm)
-    cc_poke_imm_f32(0x0082F914u, 1.0f, ig_aff);   // F_VPRESET SCALE_Y imm (mov [0x00ACC0EC],imm)
+    // ---- F_VPRESET in-game 2D-affine SCALE_X/Y seeds (0x0082F8F4/0x0082F914) REMOVED ----
+    // These two imm32 operands are the `mov [0xACC0E8/0xACC0EC], 0x3f800000` identity-1.0
+    // affine-reset immediates. Ephinea leaves them STOCK 1.0 — poking them to render_w/dw
+    // is the over-patch that produced the lobby black bars (BUG-1). Boot dup deleted (the
+    // apply_special in-game-affine block is removed too). render_w param is now unused.
 
     // ---- Lobby game-list "NN-NN" bar 4:3 right-ceiling -> design_w (16:9 full width) ----
     // (static RE, disasm-verified). The lobby NN-NN/game-list bar is emitted
@@ -3021,8 +2744,8 @@ static void apply_startup_bakes(int render_w)
     // edge with no overshoot (server login was blocked when this shipped).
     cc_poke_imm_f32(0x00721FC0u, 640.0f, dw);     // NN-NN bar right-edge vertex X (853.33 @16:9 hs1.0)
 
-    log_line("[pso_widescreen] startup-bakes: done (dw=%.3f a+10=%.3f ig_aff=%.4f; cc rows=runtime-only/not-strided; nnbar=dw)",
-             dw, a_plus_10, ig_aff);
+    log_line("[pso_widescreen] startup-bakes: done (dw=%.3f; login-seeds+F_VPRESET-affine removed; cc rows=runtime-only/not-strided; nnbar=dw)",
+             dw);
 }
 
 // ============================================================
@@ -3175,7 +2898,9 @@ static void patch_ad_draw_line(const ws_scale_ctx *s)
 static void apply_special(const ws_scale_ctx *s);   /* fwd: apply_bakes calls it */
 
 static const bake_t kBakes[] = {
-/* ===== kBakes[] — 732 authoritative rows (anzz1 folded + patch_* extracted) ===== */
+/* ===== kBakes[] — 780 authoritative rows (anzz1 folded + patch_* extracted) =====
+   (ANZZ1 565 + EPHINEA 148 + TRINITY 56 + OURS 11; the per-source subheaders below
+   predate recent additions and may read low — the ARRAYLEN macro is authoritative.) */
 /* fields: va, kind, base, coeff, offset, src, gate, stock, note, base2 */
   /* ---- SRC_ANZZ1 : 566 rows ---- */
   { 0x004011C0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
@@ -3903,17 +3628,23 @@ static const bake_t kBakes[] = {
   /* REMOVED: 24 FIX-D dressing-room hex-tile rows (dr.tile.pos 0x0091DBxx +
      dr.tile.wh 0x009B77xx). Ephinea does NOT scale char-create tiles — deleted
      to match its delta. (K_U16 kind left defined for future use.) */
-  /* ---- SRC_OURS : 27 rows ---- */
-  { 0x004EC0AF, K_ADD, B_A, 1.0f, -640.0f, SRC_OURS, GATE_CHARSELECT, 0x44230000, "dr.honeycomb.enter_exit.right_edge  WRITTEN VALUE = st", B_LIT },
+  /* ---- SRC_OURS : 11 rows ---- */
+  /* REMOVED (Ephinea-fidelity pass): 0x004EC0AF dr.honeycomb.enter_exit.right_edge
+     (4:3 no-op, not in Ephinea's patchset). */
   { 0x004EC951, K_SET, B_A, 1.0625f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x442A0000, "csel.honeycomb.frame", B_LIT },  /* 1.0625=680/640; res-scales design_w like Ephinea (1.0625*853.33~906). .text imm32 <0x008F8000 => icache flush. */
   { 0x006F49FD, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.outer.mag (code imm32 of `push 430.0`; ONE-S", B_LIT },
   { 0x006F4A57, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.inner.mag (code imm32 of `push 178.0`; ONE-S", B_LIT },
-  { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "bb.line.cleanup.1; NOP 5 bytes over CALL 0x0082b558 (t", B_LIT },
-  { 0x00719FD4, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x11157FE8, "bb.line.cleanup.2; NOP 5 bytes over CALL 0x0082b558 (t", B_LIT },
+  /* OWNER-MANDATED PERMANENT NOPs (re-added 2026-06-21; the "Ephinea-fidelity" pass
+     WRONGLY removed these and the owner has re-instructed multiple times to keep them).
+     NOP the two `call 0x0082b558` emits in render_menu_hud — these draw the in-game F12
+     main-menu fade-curtain, which renders as SOLID BLACK BARS top+bottom at 16:9 when
+     the call is live (it emits a 4:3-extent curtain). Suppressing the call = no bars.
+     This is a standing custom (a 4th, beyond model-pan / rune / minimap). DO NOT REMOVE. */
+  { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "bb.line.cleanup.1 NOP call 0x82b558 (F12 fade-curtain; OWNER PERMA)", B_LIT },
+  { 0x00719FD4, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x11157FE8, "bb.line.cleanup.2 NOP call 0x82b558 (F12 fade-curtain; OWNER PERMA)", B_LIT },
   { 0x00721FC0, K_SET, B_A, 1.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x44200000, "lobby.nnbar.rightEdgeX (= dw; 640 4:3-ceiling raised t", B_LIT },
-  { 0x007583C1, K_SET, B_A, 1.0f, 10.0f, SRC_OURS, GATE_ALWAYS, 0x44228000, "login.menu.primaryX1 (a_plus_10 = dw+10)", B_LIT },
-  { 0x007583F3, K_SET, B_A, 1.0f, 10.0f, SRC_OURS, GATE_ALWAYS, 0x44228000, "login.menu.secondaryX2 (a_plus_10 = dw+10)", B_LIT },
-  { 0x0075840B, K_SET, B_A, 1.0f, 10.0f, SRC_OURS, GATE_ALWAYS, 0x44228000, "login.menu.animTarget (a_plus_10 = dw+10)", B_LIT },
+  /* REMOVED (Ephinea-fidelity pass): 0x007583C1 / 0x007583F3 / 0x0075840B login-menu
+     X seeds (4:3 no-ops, not in Ephinea's patchset). */
   { 0x0096E114, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.size (live read*hud_scale, ONE-SHOT; no fixed", B_LIT },
   { 0x0096E168, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[0] (table -137,-79,137,-79,0,156; this fl", B_LIT },
   { 0x0096E16C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[1] (stock -79; ONE-SHOT live*hud_scale)", B_LIT },
@@ -3925,10 +3656,133 @@ static const bake_t kBakes[] = {
      were DELETED — sprite-scaling them over-stretched "SONIC TEAM(TM)" and dragged the
      blank right quad over the TM. Ephinea widens ONLY the two right-quad x2 coords
      (0x009A3468/0x009A3488), kept via the anzz1 SRC_ANZZ1 "hud.w" rows above. */
-  { 0x00A1132C, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.vp.w = const float w=128.0 (NOT a design-X coo", B_LIT },
-  { 0x00A11330, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.vp.h = const float h=128.0 (NOT a design coord", B_LIT },
-  { 0x00A11400, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.bg.w = const float w=128.0 (NOT a design-X coo", B_LIT },
-  { 0x00A11404, K_SET, B_LIT, 128.0f, 0.0f, SRC_OURS, GATE_MINIMAP, 0x00000000, "minimap.bg.h = const float h=128.0 (NOT a design coord", B_LIT },
+  /* REMOVED (Ephinea-fidelity pass): minimap vp/bg W/H rows 0x00A1132C / 0x00A11330 /
+     0x00A11400 / 0x00A11404 — all inert stock-128 size fields, not in Ephinea's
+     patchset. (The minimap X-anchors 0x00A11324 + 0x00A113E8 stay as SRC_ANZZ1
+     deanchor.full rows; custom C3 nudges them in apply_special.) */
+  /* ---- SRC_EPHINEA : 31 X-axis widens the recode MISSED ----
+     Re-verified 2026-06-21 by cross-checking the FULL byte-delta vs this table:
+     Ephinea widens these VAs but our table never referenced them, so they sat at
+     stock 4:3 ("left at 4:3 / unchanged resolution math"). 24 WIDTH = stock*(A/640)
+     via K_MUL B_WIDENX; 6 CENTER = stock+(A-640)/2 and 1 RIGHT = stock+(A-640) via
+     K_ADD B_A. All are bit-exact no-ops at 4:3 and reproduce Ephinea's live value at
+     16:9 (31/31). Clusters: front-end menus 0x0040xx, ending/credits viewport
+     0x00785xx (InitializeEndingViewport), char-select anchor block 0x008F9E-B1
+     (FLOAT_008f9xxx, beside the 92-VA block), congrats/results name-X 0x009CA5
+     (Trinity-confirmed center), plus align-list 0x009721 + misc fe floats. */
+  { 0x0040934C, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43968000, "fe.menu0409.w", B_LIT },
+  { 0x00409398, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43968000, "fe.menu0409.w", B_LIT },
+  { 0x004093B0, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42480000, "fe.menu0409.w", B_LIT },
+  { 0x004093C8, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42480000, "fe.menu0409.w", B_LIT },
+  { 0x0040CA07, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43540000, "fe.menu040c.w", B_LIT },
+  { 0x0040CA40, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43540000, "fe.menu040c.w", B_LIT },
+  { 0x0040CA66, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43650000, "fe.menu040c.w", B_LIT },
+  { 0x0040CA8C, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43650000, "fe.menu040c.w", B_LIT },
+  { 0x0040CAE2, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43CC8000, "fe.menu040c.w", B_LIT },
+  { 0x0040CB1E, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43CC8000, "fe.menu040c.w", B_LIT },
+  { 0x00785679, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "ending.vp.w", B_LIT },
+  { 0x007856FB, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "ending.vp.w", B_LIT },
+  { 0x00785737, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x439E0000, "ending.vp.w", B_LIT },
+  { 0x0078574B, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x441A0000, "ending.vp.w", B_LIT },
+  { 0x00785787, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x439E0000, "ending.vp.w", B_LIT },
+  { 0x0078579B, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x441A0000, "ending.vp.w", B_LIT },
+  { 0x00785C0A, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "ending.vp.w", B_LIT },
+  { 0x00785C34, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x41200000, "ending.vp.w", B_LIT },
+  { 0x00785C42, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43AA0000, "ending.vp.w", B_LIT },
+  { 0x008F9EC0, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "csel.block.w", B_LIT },
+  { 0x008F9F20, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x4407C000, "csel.block.cx", B_LIT },
+  { 0x008FB114, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43A00000, "csel.block.w", B_LIT },
+  { 0x0091EEB8, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43A00000, "fe.91ee.w", B_LIT },
+  { 0x00920010, K_ADD, B_A,      1.0f, -640.0f, SRC_EPHINEA, GATE_ALWAYS, 0x44228000, "fe.9200.rx", B_LIT },
+  { 0x00972120, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43898000, "align.9721.cx", B_LIT },
+  { 0x00972130, K_ADD, B_A,      1.0f, -640.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43C80000, "align.9721.rx", B_LIT },
+  { 0x009C94A0, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43A00000, "fe.9c94.w", B_LIT },
+  { 0x009CA53C, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43800000, "congrats.name.cx", B_LIT },
+  { 0x009CA544, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43C00000, "congrats.name.cx", B_LIT },
+  { 0x009CA54C, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43000000, "congrats.name.cx", B_LIT },
+  { 0x009CA554, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x44008000, "congrats.name.cx", B_LIT },
+  /* ---- SRC_TRINITY : 3 Y-axis anchors the byte-delta could NOT see ----
+     Trinity MOD_Y_* anchors are bit-exact no-ops at the standard HUD (hudResY==480
+     = the state Ephinea was dumped in), so they never appeared in _ephinea_delta.csv.
+     Cross-checking Trinity's same-build hudElements[] surfaced ~63 Y-anchor candidates;
+     an exhaustive adversarial RE (workflow w81hga0ci, 14 agents) confirmed Ephinea
+     deliberately leaves 52 of them to the in-game 2D affine + the FUN_52d8cb90
+     ListWindow detour (static-patching them = DOUBLE scale), and that ONLY these 3
+     have a confirmed Ephinea cascade write (Loop6 half-height table / direct renderH
+     write in the unpacked DLL) AND fold to bit-exact 4:3 no-ops. They compose with the
+     affine exactly like the already-shipped deanchor.vcenter rows. */
+  { 0x0096FFF4, K_ADD, B_C, 0.5f, -240.0f, SRC_TRINITY, GATE_ALWAYS, 0x43700000, "hud.f1help.y MOD_Y_C", B_LIT },
+  { 0x009712EC, K_ADD, B_C, 1.0f, -480.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F00000, "hud.f12bg.bottom MOD_Y_B (=renderH)", B_LIT },
+  { 0x0097213C, K_SET, B_C, 0.5f,  -25.0f, SRC_TRINITY, GATE_ALWAYS, 0x43570000, "ig.cmode_area_popup.y MOD_Y_C (st215)", B_LIT },
+
+  /* ===== SRC_EPHINEA : 22 cascade VAs the table was MISSING =====
+     Full cross-check of OUR table vs Ephinea's complete unpacked-DLL patchset
+     (_eph_patchset.json, 752 VAs) found 63 VAs Ephinea patches that we never
+     referenced; 22 map 1:1 to our row kinds and are added here (the other 41 are
+     Stage-C frame geometry / SSAA-inline / co-op PlayerScale / code-patches that
+     need individual RE — NOT auto-baked). All are 4:3-safe (B_C->480, B_WIDENX->1.0)
+     and present in Ephinea's patchset, so they compose with the now-stock affine
+     exactly as Ephinea does (no double-scale). Includes the char-select Tab-button
+     3rd Y-state 0x00410639 (Loop5_Hadd_full) whose ABSENCE caused the Tab button to
+     animate through the un-patched stock Y on load = the "crawl-down" the owner saw. */
+  { 0x0040CB07, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43E40000, "eph.92va.l5.hadd.raw", B_LIT },
+  { 0x0040CB2C, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43E48000, "eph.92va.l5.hadd.raw", B_LIT },
+  { 0x0040CB44, K_MUL, B_WIDENX,  1.0f,     0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43D50000, "eph.92va.l1.wmul", B_LIT },
+  { 0x0040CB52, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43D50000, "eph.92va.l5.hadd.raw", B_LIT },
+  { 0x0040CB6A, K_MUL, B_WIDENX,  1.0f,     0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43D50000, "eph.92va.l1.wmul", B_LIT },
+  { 0x0040CB78, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43D48000, "eph.92va.l5.hadd.raw", B_LIT },
+  { 0x00410639, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43D28000, "csel.tab.details_mid.y (Tab crawl fix)", B_LIT },
+  { 0x0070D440, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43820000, "eph.loop5.hadd.full", B_LIT },
+  { 0x0070D45E, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43820000, "eph.loop5.hadd.full", B_LIT },
+  { 0x0075A8C5, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43AC0000, "eph.loop5.hadd.full", B_LIT },
+  { 0x008F9EFC, K_MUL, B_HUDSCALE, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x41000000, "eph.92va.l2.hmul", B_LIT },
+  { 0x008F9F1C, K_ADD, B_C,       0.5f,  -240.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42920000, "eph.92va.l4.hadd", B_LIT },
+  { 0x008F9F24, K_ADD, B_C,       0.5f,  -240.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42960000, "eph.92va.l4.hadd", B_LIT },
+  { 0x008F9F48, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43D00000, "eph.92va.l5.hadd.raw", B_LIT },
+  { 0x008FA134, K_MUL, B_WIDENX,  1.0f,     0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x00000000, "eph.92va.l1.wmul (st0)", B_LIT },
+  { 0x008FA154, K_MUL, B_WIDENX,  1.0f,     0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x00000000, "eph.92va.l1.wmul (st0)", B_LIT },
+  { 0x0091EEB4, K_ADD, B_C,       0.5f,  -240.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43700000, "eph.loop6.hadd.half", B_LIT },
+  { 0x00920008, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43F50000, "eph.loop5.hadd.full", B_LIT },
+  { 0x00972124, K_ADD, B_C,       0.5f,  -240.0f, SRC_EPHINEA, GATE_ALWAYS, 0x432F0000, "eph.loop6.hadd.half", B_LIT },
+  { 0x00972134, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43AA0000, "eph.loop5.hadd.full", B_LIT },
+  { 0x0097214C, K_ADD, B_C,       1.0f,  -480.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43B20000, "eph.loop5.hadd.full", B_LIT },
+  { 0x009C94A4, K_ADD, B_C,       0.5f,  -240.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43480000, "eph.loop6.hadd.half", B_LIT },
+
+  /* ===== SRC_EPHINEA : char-create dressing-room hex-tile backdrop =====
+     Ephinea scales PSOBB's char-create dressing-room hex-tile backdrop by
+     ×(renderH/480) == ×hud_scale, gated to char-create (the float/short H-loops in
+     the unpacked DLL; confirmed vs Trinity resolution.cpp + the stock decompile
+     RenderChallengePanelBackground_004ed008 / RenderUIPiece_0082b6bc). 24 .data VAs:
+     12 vec2f positions (K_MUL B_HUDSCALE, ×hud_scale on the live stock float) + 12
+     u16 W/H sizes (K_U16 B_HUDSCALE, 16-bit RMW ×hud_scale, round-to-nearest). Both
+     are bit-exact no-ops at HudScale 1.0 (4:3) and 2× at HudScale 2.0. This REPLACES
+     the deleted cc_backdrop_emit splice (Ephinea has no per-frame column emit). */
+  /* dressing-room tile X/Y positions — Ephinea float H-loop (×renderH/480 = ×hud_scale) */
+  { 0x0091DBD0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43C00000, "cc.tile.id12.X (384)",  B_LIT },
+  { 0x0091DBD8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43C00000, "cc.tile.id13.X (384)",  B_LIT },
+  { 0x0091DBDC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id13.Y (256)",  B_LIT },
+  { 0x0091DBE8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000000, "cc.tile.id14.X (0)",    B_LIT },
+  { 0x0091DBEC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id14.Y (256)",  B_LIT },
+  { 0x0091DBF0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id15.X (256)",  B_LIT },
+  { 0x0091DBF8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id16.X (256)",  B_LIT },
+  { 0x0091DBFC, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43000000, "cc.tile.id16.Y (128)",  B_LIT },
+  { 0x0091DC00, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id17.X (256)",  B_LIT },
+  { 0x0091DC04, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id17.Y (256)",  B_LIT },
+  { 0x0091DC08, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43800000, "cc.tile.id18.X (256)",  B_LIT },
+  { 0x0091DC0C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43C00000, "cc.tile.id18.Y (384)",  B_LIT },
+  /* dressing-room tile W/H sizes — Ephinea short H-loop (×renderH/480 = ×hud_scale), RMW u16 */
+  { 0x009B77D0, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000100, "cc.tile.id12.W (256)",  B_LIT },
+  { 0x009B77D2, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000100, "cc.tile.id12.H (256)",  B_LIT },
+  { 0x009B77E4, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000100, "cc.tile.id13.W (256)",  B_LIT },
+  { 0x009B77E6, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000100, "cc.tile.id13.H (256)",  B_LIT },
+  { 0x009B77F8, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id14.W (128)",  B_LIT },
+  { 0x009B77FA, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id14.H (128)",  B_LIT },
+  { 0x009B780C, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id15.W (128)",  B_LIT },
+  { 0x009B780E, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id15.H (128)",  B_LIT },
+  { 0x009B7820, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id16.W (128)",  B_LIT },
+  { 0x009B7822, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id16.H (128)",  B_LIT },
+  { 0x009B7834, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id17.W (128)",  B_LIT },
+  { 0x009B7836, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id17.H (128)",  B_LIT },
 };
 
 
@@ -3967,6 +3821,7 @@ static float resolve_base(uint8_t base, const ws_scale_ctx *s)
         case B_AFFINEY:  return (s->C > 1.0f) ? ((float)s->render_h / s->C) : 1.0f;
         case B_ANATIVE:  return (s->hud_scale > 0.01f) ? (s->A / s->hud_scale) : s->A;
         case B_CNATIVE:  return (s->hud_scale > 0.01f) ? (s->C / s->hud_scale) : s->C;
+        case B_WIDENX:   return s->A / 640.0f;   /* width-widen factor; 1.0 @4:3 */
         case B_LIT:
         default:         return 1.0f;
     }
@@ -4105,38 +3960,44 @@ static void sp_write_f32(uint32_t va, float v)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-/* apply_special — the 9 rows that aren't (coeff*base+offset)*base2: they read
-   live cfg (minimap), a runtime ratio (in-game affine), or branch on aspect
-   (hangame). Called at the tail of apply_bakes. NOTE: verify the hangame and
-   FVPRESET formulas against patch_hangame_title_menu_layout / apply_startup_bakes
-   when folding (placeholder uses the documented widescreen forms). */
+/* C3 minimap corner-nudge helper. Adds an EQUAL delta to a Loop4 X-anchor whose
+   synced Ephinea position the kBakes deanchor.full row set right before us. Folds
+   so re-running apply_special never compounds: the un-nudged base is snapshotted
+   per-VA on first sight, and we always write base+delta (value-guarded). The base
+   is stable per resolution (deanchor = stock + (A-640), A constant), so the snapshot
+   stays valid across every front-end<->in-game re-bake. */
+static void minimap_nudge_x_apply(uint32_t va, int slot, float delta)
+{
+    static float s_base[2]   = { 0.0f, 0.0f };
+    static int   s_have[2]   = { 0, 0 };
+    if (slot < 0 || slot > 1) return;
+    if (!s_have[slot]) {
+        /* first sight: the live value is the un-nudged Ephinea anchor (the kBakes
+           deanchor.full row just reset it); snapshot it as the additive base. */
+        s_base[slot] = hs_peek_f32(va);
+        s_have[slot] = 1;
+    }
+    sp_write_f32(va, s_base[slot] + delta);   /* value-guarded; never compounds */
+}
+
+/* apply_special — the special rows that aren't (coeff*base+offset)*base2. After the
+   Ephinea-fidelity pass this is ONLY custom C3: nudge the whole minimap toward the
+   right corner by adding ONE equal delta to BOTH layers' X-anchors (viewport
+   0x00A11324 + background 0x00A113E8), which the kBakes deanchor.full rows have just
+   set to their synced Ephinea positions. Equal delta on both keeps fg+bg locked
+   together (the desync fix); Y (0x00A1133C/0x00A113F4) and the size fields
+   (0x00A11328/0x00A113EC) are left exactly as Ephinea / the kBakes pass set them.
+   The removed over-patch blocks (minimap absolute writes, in-game F_VPRESET affine,
+   hangame title-menu absolute writes) are gone — Ephinea positions all of those via
+   its faithful cascade VAs (already covered by kBakes rows) and leaves the affine
+   reset stock 1.0. */
 static void apply_special(const ws_scale_ctx *s)
 {
-    /* minimap (ours): positions = ui_coord(cfg coord); zoom = raw cfg literal. */
-    if (g_cfg.patch_minimap) {
-        sp_write_f32(0x00A113E8, ui_coord(g_cfg.minimap_bg_x));
-        sp_write_f32(0x00A113EC, ui_coord(g_cfg.minimap_bg_y));
-        sp_write_f32(0x00A11324, ui_coord(g_cfg.minimap_vp_x));
-        sp_write_f32(0x00A11328, ui_coord(g_cfg.minimap_vp_y));
-        sp_write_f32(0x00804A5D, g_cfg.minimap_zoom);   /* .text imm; not scaled */
-    }
-    /* in-game 2D affine preset (F_VPRESET) = render_w / design_w; design_w == s->A
-       (set by the kBakes design_w row that ran just before us). */
-    if (s->A > 1.0f) {
-        float ig_aff = (float)s->render_w / s->A;
-        sp_write_f32(0x0082F8F4, ig_aff);
-        sp_write_f32(0x0082F914, ig_aff);
-    }
-    /* hangame title menu (Login/Start Game/...): widescreen places it from the
-       wide extents; the 4:3 fallback never fires here (apply_* only run enabled). */
-    if (g_cfg.patch_hangame_title_menu) {
-        if (s->A > 640.0f) {
-            sp_write_f32(0x00974E08, s->A * 0.5f - 110.0f);
-            sp_write_f32(0x00974E0C, s->C - 140.0f);
-        } else {
-            sp_write_f32(0x00974E08, ui_coord(g_cfg.hangame_menu_x));
-            sp_write_f32(0x00974E0C, ui_coord(g_cfg.hangame_menu_y));
-        }
+    (void)s;
+    /* C3 (ours): minimap corner-nudge — equal additive delta on both X layers. */
+    if (g_cfg.patch_minimap && g_cfg.minimap_nudge_x != 0.0f) {
+        minimap_nudge_x_apply(0x00A11324u, 0, g_cfg.minimap_nudge_x);  /* viewport X  */
+        minimap_nudge_x_apply(0x00A113E8u, 1, g_cfg.minimap_nudge_x);  /* background X */
     }
 }
 
@@ -4347,6 +4208,9 @@ static void apply_engine_patches(const ws_scale_ctx *s)
     // Char-select 3D model pan: E8 redirect of the scene's ResetNPCCamera call.
     // World-space; survives PatchCharSelect=0 (orthogonal to the 2D layout).
     patch_charselect_model_pan();
+    // Over-head player name-label scaler (Ephinea FUN_52dc4f60 port): E8 redirect
+    // of the name-tag draw call @0x0078A300. No-op at 4:3; name-tags only.
+    patch_name_label_scaler();
     // Char-create class-select layout: AUTHORITATIVE-SOURCE bake .
     // The two render-thread MinHooks (composer 0x0082BB74 + info-text 0x0082B440)
     // and their leaking negative gate are DELETED; every char-create content

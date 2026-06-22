@@ -62,6 +62,9 @@ typedef enum {
     B_ANATIVE,   /* A / hud_scale  (native design width, hud-independent;
                     the dressing-room shift is native 213.33, not A-640) */
     B_CNATIVE,   /* C / hud_scale  (native design height)                */
+    B_WIDENX,    /* A / 640  — width-widen factor (==1.0 @4:3, design_w/640
+                    @16:9). For K_MUL width rows: value = stock * (A/640),
+                    exactly stock at 4:3, so the no-op is bit-exact.        */
 } bake_base_t;
 
 /* ---- attribution (logged; drives no behaviour) ---- */
