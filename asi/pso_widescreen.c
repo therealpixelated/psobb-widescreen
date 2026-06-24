@@ -2180,9 +2180,16 @@ static void __cdecl lw_yanchor_compute(const float *xy)
     // using its OWN .rdata re-base 334, NOT the stock ctor base 184. The first port
     // used base 184 (=stock 0x972DEC Y) -> design_h-296 = +150px too HIGH. Fixed.
     // NB Ephinea re-bases at 4:3 too (design_h=480 -> Y=334, not stock 184).
-    float dh = hs_peek_f32(0x0098A4B4u);                // design_h: 480 / 720@hs1.5 / 960@hs2.0
-    float newy = dh - 480.0f + 334.0f;                 // Ephinea: dh - 146 (C1=480, C2=334)
-    g_lwy_scratch[1] = *(volatile uint32_t *)&newy;
+    // CORRECTED 2026-06-22 (workflow wf3tsoh2f, engine-decompile verified): this slot is
+    // NOT a Y position — it is the {w,h} dimension pair's HEIGHT (InitBase init_data[1] ->
+    // MenuListItem +0x3c source.height -> +0x4c render.height). Writing design_h-146 here
+    // INFLATED the list-frame height (334@hs1.0 / 574@1.5 / 814@2.0 vs stock 184), so the
+    // Hunter's-Guild / bank / shop / game-list box rendered ~80% tall regardless of entry
+    // count, AND it regressed 4:3 (wrote 334, not 184). The old "Ephinea Y=design_h-146"
+    // reading was a field misidentification. Restore the stock height; the existing global
+    // 2D affine 0x00ACC0E8/EC then scales it exactly like stock. (A genuine Ephinea bottom-
+    // anchor, if wanted, must target the POSITION arg / object +0x34, never this dim pair.)
+    g_lwy_scratch[1] = *(const volatile uint32_t *)&xy[1];   // HEIGHT pass-through = stock 184
 
     // X: KEEP STOCK 385. The earlier "Ephinea live viewport-edge X = *(float*)0x00973CEC"
     // port was MIS-MAPPED: disasm (memory listwindow-yanchor-ephinea-verified-offby150)
@@ -2904,6 +2911,49 @@ static const bake_t kBakes[] = {
 /* fields: va, kind, base, coeff, offset, src, gate, stock, note, base2 */
   /* ---- SRC_ANZZ1 : 566 rows ---- */
   { 0x004011C0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
+  { 0x009712DC, K_SET, B_C, -1.0f, 720.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  { 0x009A3844, K_U32, B_D, 3.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A384C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3858, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3860, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A386C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3874, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3888, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A3894, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A389C, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38B0, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38BC, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38C4, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x009A38D8, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
+  { 0x004EC0BE, K_SET, B_C, 1.0f, 12.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F60000, "dr.honeycomb.bottom.y MOD_Y_B (stock 492)", B_LIT },
+  { 0x00790AF5, K_SET, B_A, 0.5f, -160.0f, SRC_TRINITY, GATE_ALWAYS, 0x43200000, "cfg.kbd_overwrite_custom_settings.x (.text MOD_X_C)", B_LIT },
+  { 0x00799ECA, K_SET, B_A, 0.5f, -140.0f, SRC_TRINITY, GATE_ALWAYS, 0x43340000, "cfg.leave_team_confirm.x (.text MOD_X_C)", B_LIT },
+  { 0x0091DC84, K_SET, B_C, 1.0f, -84.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C60000, "dr.inputname.field.y MOD_Y_B (stock 396)", B_LIT },
+  { 0x0096E52C, K_SET, B_A, 1.0f, 40.0f, SRC_TRINITY, GATE_ALWAYS, 0x442A0000, "fe.fixedchat.next.x MOD_X_R +right (stock 680)", B_LIT },
+  { 0x00970FF0, K_SET, B_C, 1.0f, -550.0f, SRC_TRINITY, GATE_ALWAYS, 0xC28C0000, "fe.ime.id.y MOD_Y_B (stock -70)", B_LIT },
+  { 0x00971350, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.party_mode_submenu.x (MOD_X_C)", B_LIT },
+  { 0x00971358, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.difficulty_submenu.x (MOD_X_C)", B_LIT },
+  { 0x00972070, K_SET, B_A, 0.5f, -188.0f, SRC_TRINITY, GATE_ALWAYS, 0x43040000, "ig.battle_result.x (MOD_X_C)", B_LIT },
+  { 0x009721E0, K_SET, B_A, 0.5f, -169.0f, SRC_TRINITY, GATE_ALWAYS, 0x43170000, "ig.in_battle_description.x (MOD_X_C)", B_LIT },
+  { 0x009721F8, K_SET, B_A, 0.5f, -32.0f, SRC_TRINITY, GATE_ALWAYS, 0x43900000, "ig.cmode_reward_dialog.x (MOD_X_C)", B_LIT },
+  { 0x00972200, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.cmode_srank_name_dialog.x (MOD_X_C)", B_LIT },
+  { 0x00972208, K_SET, B_A, 0.5f, 39.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B38000, "ig.cmode_reward_dialog_submenu.x (MOD_X_C)", B_LIT },
+  { 0x00972510, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43870000, "lobby.soccer.score.x (MOD_X_C: stock270 + (A-640)/2)", B_LIT },
+  { 0x00972538, K_SET, B_A, 0.5f, -139.0f, SRC_TRINITY, GATE_ALWAYS, 0x43350000, "ig.info_counter_create_party.x (MOD_X_C)", B_LIT },
+  { 0x00972568, K_SET, B_A, 1.0f, -245.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C58000, "ig.battle_disconnect_dlg.x (MOD_X_R)", B_LIT },
+  { 0x009725D8, K_SET, B_A, 0.5f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43828000, "ig.cmode_srank_name_caret.x (MOD_X_C)", B_LIT },
+  { 0x009725F0, K_SET, B_A, 0.5f, -279.0f, SRC_TRINITY, GATE_CHARSELECT, 0x42240000, "shipsel.login-error.x (MOD_X_C: stock41 + (A-640)/2)", B_LIT },
+  { 0x009725F4, K_SET, B_C, 0.5f, -112.0f, SRC_TRINITY, GATE_ALWAYS, 0x43000000, "shipselect.loginerror.y MOD_Y_C +half (stock 128)", B_LIT },
+  { 0x009725F8, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.join_room_password_request.x (MOD_X_C)", B_LIT },
+  { 0x00972600, K_SET, B_A, 0.5f, -211.0f, SRC_TRINITY, GATE_ALWAYS, 0x42DA0000, "ig.join_room_password_caret.x (MOD_X_C)", B_LIT },
+  { 0x00972638, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_name_field.x (MOD_X_C)", B_LIT },
+  { 0x00972640, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_password_field.x (MOD_X_C)", B_LIT },
+  { 0x00972688, K_SET, B_A, 0.5f, -289.0f, SRC_TRINITY, GATE_ALWAYS, 0x41F80000, "ig.team_invitation_explanation.x (MOD_X_C)", B_LIT },
+  { 0x00979BCC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_texture.x (MOD_X_C; offset 0)", B_LIT },
+  { 0x0097E458, K_SET, B_C, 1.0f, -90.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C30000, "fe.login.botright.y MOD_Y_B (stock 390)", B_LIT },
+  { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_TRINITY, GATE_ALWAYS, 0x44084000, "fe.login.botright.x MOD_X_R +right (stock 545)", B_LIT },
+  { 0x009F24E4, K_SET, B_A, 0.5f, 168.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F40000, "ig.team_invitation_explanation_submenu.x (MOD_X_C)", B_LIT },
+  { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_bg_texture.x (MOD_X_C; offset 0)", B_LIT },
   { 0x004011D2, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x004011DD, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x004011EF, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
@@ -3163,7 +3213,6 @@ static const bake_t kBakes[] = {
   { 0x00970808, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x0097080C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009710BC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
-  { 0x009712DC, K_SET, B_C, -1.0f, 720.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x00971F44, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
   { 0x00971F4C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
   { 0x00971F54, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
@@ -3389,32 +3438,19 @@ static const bake_t kBakes[] = {
   { 0x009A3468, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009A3488, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009A3840, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A3844, K_U32, B_D, 3.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3848, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A384C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3854, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A3858, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A385C, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A3860, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3868, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A386C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3870, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A3874, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A387C, K_U32, B_BCEIL, 4.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3884, K_U32, B_BCEIL, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A3888, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A3894, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3898, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A389C, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38AC, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A38B0, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38B8, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A38BC, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38C0, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A38C4, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38CC, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38D4, K_U32, B_BCEIL, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x009A38D8, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A6900, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009A6908, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009A690C, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
@@ -3438,10 +3474,9 @@ static const bake_t kBakes[] = {
   { 0x009B8DDC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009D0040, K_SET, B_A, 0.5f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009D0044, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
-  { 0x009F0A80, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
-  { 0x009F0A88, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
-  { 0x009F0A90, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.delay", B_LIT },
-  { 0x009F0A98, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom.delay", B_LIT },
+  /* REMOVED 2026-06-21 (forward-divergence prune): 0x009F0A80/88/90/98 deanchor.bottom
+     — anzz1 MOD_Y_B rows Ephinea patches in NEITHER its patchset NOR the byte-delta =
+     genuine over-patches (the double-patch pattern). 4:3 no-ops, safe to drop. */
   { 0x009F0ADC, K_SET, B_A, 1.0f, -157.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009F0AF4, K_SET, B_A, 1.0f, -288.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009F0B0C, K_SET, B_A, 1.0f, -157.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
@@ -3559,9 +3594,9 @@ static const bake_t kBakes[] = {
   { 0x008FAC00, K_SET, B_A, 1.0f, -212.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D60000, "csel.fgright.sibling.x (stock428 + (A-640)); hs1.0 dR=", B_LIT },
   { 0x008FAC08, K_SET, B_A, 1.0f, -212.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D60000, "csel.fgright.recreate-confirm.x (stock428 + (A-640)); ", B_LIT },
   { 0x008FADC8, K_SET, B_A, 0.5f, -256.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42800000, "csel.banner.x (stock64 + half)", B_LIT },
-  { 0x0091D988, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44178000, "dr.toprow.ok_back.x  WRITTEN VALUE = stock(606.0)+ (s-", B_LIT },
-  { 0x0091DC74, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44170000, "dr.charname.field.x  WRITTEN VALUE = stock(604.0)+ (s-", B_LIT },
-  { 0x0091DD1C, K_ADD, B_ANATIVE, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44198000, "dr.botrow.ok_back.x  WRITTEN VALUE = stock(614.0)+ (s-", B_LIT },
+  { 0x0091D988, K_ADD, B_A, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44178000, "dr.toprow.ok_back.x  WRITTEN = stock(606.0)+(s->A-640); B_A(=gameRenderW)=Ephinea Loop4_Wadd_full; B_ANATIVE(853)=under-move bug", B_LIT },
+  { 0x0091DC74, K_ADD, B_A, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44170000, "dr.charname.field.x  WRITTEN = stock(604.0)+(s->A-640); B_A=Ephinea Loop4_Wadd_full", B_LIT },
+  { 0x0091DD1C, K_ADD, B_A, 1.0f, -640.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44198000, "dr.botrow.ok_back.x  WRITTEN = stock(614.0)+(s->A-640); B_A=Ephinea Loop4_Wadd_full", B_LIT },
   { 0x0096E27C, K_SET, B_HUDSCALE, 165.0f, 0.0f, SRC_EPHINEA, GATE_STREAK_SCALE, 0x42F80000, "streak.scale.x = 165*hud_scale (cancels 2.25/hud_scale front-end affine to ~371px; =165 @hs1.0 so 0x42F80000 stock-guard holds, 4:3 no-op)", B_LIT },
   { 0x0096E278, K_SET, B_HUDSCALE, 201.0f, 0.0f, SRC_EPHINEA, GATE_STREAK_SCALE, 0x43490000, "streak.scale.y = 201*hud_scale (stock 0x43490000=201.0 from on-disk exe; =201 @hs1.0 guarded no-op, engages only hs>1)", B_LIT },
   { 0x00972148, K_SET, B_A, 0.5f, -233.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x42AE0000, "csel.banner.x (stock87 + half)", B_LIT },
@@ -3578,7 +3613,6 @@ static const bake_t kBakes[] = {
   { 0x004137C9, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.enterkey.y MOD_Y_B (stock 421)", B_LIT },
   { 0x004137D7, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.esckey.y MOD_Y_B (stock 421)", B_LIT },
   /* 0x004137DE csel.footer.details.x: orphan imm + absent from the Ephinea delta — left at stock (no SRC_TRINITY patch, to match Ephinea). */
-  { 0x004EC0BE, K_SET, B_C, 1.0f, 12.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F60000, "dr.honeycomb.bottom.y MOD_Y_B (stock 492)", B_LIT },
   { 0x004ED0BF, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.leftgrad.botL.y MOD_Y_B (stock 600)", B_LIT },
   { 0x004ED0D3, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.leftgrad.botR.y MOD_Y_B (stock 600)", B_LIT },
   { 0x004ED144, K_SET, B_C, 1.0f, 120.0f, SRC_TRINITY, GATE_ALWAYS, 0x44160000, "dr.rightgrad.botL.y MOD_Y_B (stock 600)", B_LIT },
@@ -3589,42 +3623,14 @@ static const bake_t kBakes[] = {
   { 0x0070D4E0, K_SET, B_C, 1.0f, -200.0f, SRC_TRINITY, GATE_CHARSELECT, 0x438C0000, "patch.current-status.progress.y (MOD_Y_B: C-(480-280))", B_LIT },
   { 0x0070D4F4, K_SET, B_C, 1.0f, -146.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43A70000, "patch.all-status.title.y (MOD_Y_B: C-(480-334)); .text", B_LIT },
   { 0x0070D508, K_SET, B_C, 1.0f, -96.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43C00000, "patch.all-status.progress.y (MOD_Y_B: C-(480-384)); .t", B_LIT },
-  { 0x00790AF5, K_SET, B_A, 0.5f, -160.0f, SRC_TRINITY, GATE_ALWAYS, 0x43200000, "cfg.kbd_overwrite_custom_settings.x (.text MOD_X_C)", B_LIT },
-  { 0x00799ECA, K_SET, B_A, 0.5f, -140.0f, SRC_TRINITY, GATE_ALWAYS, 0x43340000, "cfg.leave_team_confirm.x (.text MOD_X_C)", B_LIT },
   { 0x008F9E80, K_SET, B_C, 1.0f, -110.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B90000, "csel.pleaseselect.y MOD_Y_B (stock 370)", B_LIT },
   { 0x0091DAE8, K_SET, B_HUDSCALE, 560.0f, 0.0f, SRC_OURS, GATE_CHARSELECT, 0x440C0000, "csel.honeycomb.frame.h", B_LIT },  /* fld[0x91dae8]+base @0x004ec981 = frame bottom-Y; scale 560*hud_scale (1120 @hs2.0) fills HudScale-scaled design_h. stock 0x440C0000=560.0 verified on-disk; prior 0x440EE000/571.5 label+guard was wrong. .data >0x008F8000 => no icache flush. */
   { 0x0091DC70, K_SET, B_C, 1.0f, -84.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C60000, "dr.charname.field.y MOD_Y_B (stock 396)", B_LIT },
-  { 0x0091DC84, K_SET, B_C, 1.0f, -84.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C60000, "dr.inputname.field.y MOD_Y_B (stock 396)", B_LIT },
   { 0x0091DD20, K_SET, B_C, 1.0f, -46.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D90000, "dr.bottom.okback.y MOD_Y_B (stock 434)", B_LIT },
   { 0x0091E194, K_SET, B_C, 1.0f, -64.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D00000, "dr.grayline.y MOD_Y_B (stock 416)", B_LIT },
-  { 0x0096E52C, K_SET, B_A, 1.0f, 40.0f, SRC_TRINITY, GATE_ALWAYS, 0x442A0000, "fe.fixedchat.next.x MOD_X_R +right (stock 680)", B_LIT },
   { 0x0096FFFC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "fe.f1help.x MOD_X_C +half", B_LIT },
-  { 0x00970FF0, K_SET, B_C, 1.0f, -550.0f, SRC_TRINITY, GATE_ALWAYS, 0xC28C0000, "fe.ime.id.y MOD_Y_B (stock -70)", B_LIT },
-  { 0x00971350, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.party_mode_submenu.x (MOD_X_C)", B_LIT },
-  { 0x00971358, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.difficulty_submenu.x (MOD_X_C)", B_LIT },
-  { 0x00972070, K_SET, B_A, 0.5f, -188.0f, SRC_TRINITY, GATE_ALWAYS, 0x43040000, "ig.battle_result.x (MOD_X_C)", B_LIT },
   { 0x00972128, K_SET, B_A, 1.0f, -252.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C20000, "ig.cmode_records.x (MOD_X_R)", B_LIT },
   { 0x00972138, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_ALWAYS, 0x43870000, "ig.cmode_area_number_popup.x (MOD_X_C)", B_LIT },
-  { 0x009721E0, K_SET, B_A, 0.5f, -169.0f, SRC_TRINITY, GATE_ALWAYS, 0x43170000, "ig.in_battle_description.x (MOD_X_C)", B_LIT },
-  { 0x009721F8, K_SET, B_A, 0.5f, -32.0f, SRC_TRINITY, GATE_ALWAYS, 0x43900000, "ig.cmode_reward_dialog.x (MOD_X_C)", B_LIT },
-  { 0x00972200, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.cmode_srank_name_dialog.x (MOD_X_C)", B_LIT },
-  { 0x00972208, K_SET, B_A, 0.5f, 39.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B38000, "ig.cmode_reward_dialog_submenu.x (MOD_X_C)", B_LIT },
-  { 0x00972510, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43870000, "lobby.soccer.score.x (MOD_X_C: stock270 + (A-640)/2)", B_LIT },
-  { 0x00972538, K_SET, B_A, 0.5f, -139.0f, SRC_TRINITY, GATE_ALWAYS, 0x43350000, "ig.info_counter_create_party.x (MOD_X_C)", B_LIT },
-  { 0x00972568, K_SET, B_A, 1.0f, -245.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C58000, "ig.battle_disconnect_dlg.x (MOD_X_R)", B_LIT },
-  { 0x009725D8, K_SET, B_A, 0.5f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43828000, "ig.cmode_srank_name_caret.x (MOD_X_C)", B_LIT },
-  { 0x009725F0, K_SET, B_A, 0.5f, -279.0f, SRC_TRINITY, GATE_CHARSELECT, 0x42240000, "shipsel.login-error.x (MOD_X_C: stock41 + (A-640)/2)", B_LIT },
-  { 0x009725F4, K_SET, B_C, 0.5f, -112.0f, SRC_TRINITY, GATE_ALWAYS, 0x43000000, "shipselect.loginerror.y MOD_Y_C +half (stock 128)", B_LIT },
-  { 0x009725F8, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.join_room_password_request.x (MOD_X_C)", B_LIT },
-  { 0x00972600, K_SET, B_A, 0.5f, -211.0f, SRC_TRINITY, GATE_ALWAYS, 0x42DA0000, "ig.join_room_password_caret.x (MOD_X_C)", B_LIT },
-  { 0x00972638, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_name_field.x (MOD_X_C)", B_LIT },
-  { 0x00972640, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_password_field.x (MOD_X_C)", B_LIT },
-  { 0x00972688, K_SET, B_A, 0.5f, -289.0f, SRC_TRINITY, GATE_ALWAYS, 0x41F80000, "ig.team_invitation_explanation.x (MOD_X_C)", B_LIT },
-  { 0x00979BCC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_texture.x (MOD_X_C; offset 0)", B_LIT },
-  { 0x0097E458, K_SET, B_C, 1.0f, -90.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C30000, "fe.login.botright.y MOD_Y_B (stock 390)", B_LIT },
-  { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_TRINITY, GATE_ALWAYS, 0x44084000, "fe.login.botright.x MOD_X_R +right (stock 545)", B_LIT },
-  { 0x009F24E4, K_SET, B_A, 0.5f, 168.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F40000, "ig.team_invitation_explanation_submenu.x (MOD_X_C)", B_LIT },
-  { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_bg_texture.x (MOD_X_C; offset 0)", B_LIT },
   /* REMOVED: 24 FIX-D dressing-room hex-tile rows (dr.tile.pos 0x0091DBxx +
      dr.tile.wh 0x009B77xx). Ephinea does NOT scale char-create tiles — deleted
      to match its delta. (K_U16 kind left defined for future use.) */
@@ -3640,8 +3646,14 @@ static const bake_t kBakes[] = {
      main-menu fade-curtain, which renders as SOLID BLACK BARS top+bottom at 16:9 when
      the call is live (it emits a 4:3-extent curtain). Suppressing the call = no bars.
      This is a standing custom (a 4th, beyond model-pan / rune / minimap). DO NOT REMOVE. */
-  { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "bb.line.cleanup.1 NOP call 0x82b558 (F12 fade-curtain; OWNER PERMA)", B_LIT },
-  { 0x00719FD4, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x11157FE8, "bb.line.cleanup.2 NOP call 0x82b558 (F12 fade-curtain; OWNER PERMA)", B_LIT },
+  /* CORRECTED label 2026-06-22 (wppaceyt4 disasm-verified): these two NOP'd call 0x82b558
+     sites draw the two CYAN HUD menu lines (color built @0x00719F5C `or ebp,0xedff` = 0xedff,
+     depth -10.0f), NOT the F12 black curtain. The owner's standing "keep these" directive is
+     RIGHT and matches the owner's own words ("the nops are for the thin cyan lines"). The real
+     F12 black BARS are the FOUR render_triangle_fan(0xff000000) 640x480 quads @0x0082b5d8 in
+     render_menu_hud — fixed by the in-game AFFINE (SHAPE A), NOT by a NOP. KEEP both entries. */
+  { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "cyan HUD menu line .1 NOP call 0x82b558 (color edff; OWNER PERMA)", B_LIT },
+  { 0x00719FD4, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x11157FE8, "cyan HUD menu line .2 NOP call 0x82b558 (color edff; OWNER PERMA)", B_LIT },
   { 0x00721FC0, K_SET, B_A, 1.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x44200000, "lobby.nnbar.rightEdgeX (= dw; 640 4:3-ceiling raised t", B_LIT },
   /* REMOVED (Ephinea-fidelity pass): 0x007583C1 / 0x007583F3 / 0x0075840B login-menu
      X seeds (4:3 no-ops, not in Ephinea's patchset). */
@@ -3966,18 +3978,30 @@ static void sp_write_f32(uint32_t va, float v)
    per-VA on first sight, and we always write base+delta (value-guarded). The base
    is stable per resolution (deanchor = stock + (A-640), A constant), so the snapshot
    stays valid across every front-end<->in-game re-bake. */
-static void minimap_nudge_x_apply(uint32_t va, int slot, float delta)
+/* Minimap corner pin (C3). The kBakes deanchor row sets each coord to a FIXED design offset
+   from the edge (design - K). As design_w/h grow with HudScale the on-screen margin
+   (K * render/design) SHRINKS, so the box drifts toward — and off — the corner (the
+   "too far right / not far up / off the edge" reports; the *hud_scale nudge only amplified it).
+   This re-projects each coord so its SCREEN position is HudScale-INVARIANT — it equals the
+   calibrated hs1.0 corner ((native - K) + nudge) scaled onto the live design dim:
+       K     = design - base              (the fixed deanchor offset, constant across HudScale)
+       hs1.0 = native - K + nudge         (the corner coord at HudScale 1.0)
+       final = design * (hs1.0 / native)  (re-projected -> screen pos == hs1.0 at every scale)
+   `design` = live design_w/h, `native` = the hs1.0 design dim (design / hud_scale), `nudge` =
+   extra design-px toward the corner at hs1.0 (X only; 0 for Y). Snapshots the clean deanchored
+   base once (apply_special runs after the kBakes loop); value-guarded; no-op/identity at hs1.0. */
+static void minimap_corner_pin(uint32_t va, int slot, float design, float native, float nudge)
 {
-    static float s_base[2]   = { 0.0f, 0.0f };
-    static int   s_have[2]   = { 0, 0 };
-    if (slot < 0 || slot > 1) return;
+    static float s_base[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    static int   s_have[4] = { 0, 0, 0, 0 };
+    if (slot < 0 || slot > 3) return;
+    if (native < 1.0f || design < 1.0f) return;
     if (!s_have[slot]) {
-        /* first sight: the live value is the un-nudged Ephinea anchor (the kBakes
-           deanchor.full row just reset it); snapshot it as the additive base. */
-        s_base[slot] = hs_peek_f32(va);
+        s_base[slot] = hs_peek_f32(va);       /* clean deanchored base (kBakes just set it) */
         s_have[slot] = 1;
     }
-    sp_write_f32(va, s_base[slot] + delta);   /* value-guarded; never compounds */
+    float frac = (native - design + s_base[slot] + nudge) / native;
+    sp_write_f32(va, design * frac);          /* value-guarded; never compounds */
 }
 
 /* apply_special — the special rows that aren't (coeff*base+offset)*base2. After the
@@ -3993,11 +4017,21 @@ static void minimap_nudge_x_apply(uint32_t va, int slot, float delta)
    reset stock 1.0. */
 static void apply_special(const ws_scale_ctx *s)
 {
-    (void)s;
-    /* C3 (ours): minimap corner-nudge — equal additive delta on both X layers. */
-    if (g_cfg.patch_minimap && g_cfg.minimap_nudge_x != 0.0f) {
-        minimap_nudge_x_apply(0x00A11324u, 0, g_cfg.minimap_nudge_x);  /* viewport X  */
-        minimap_nudge_x_apply(0x00A113E8u, 1, g_cfg.minimap_nudge_x);  /* background X */
+    /* C3 (ours): pin the minimap to the top-right corner with a SCREEN-CONSTANT position — it
+       holds the calibrated hs1.0 corner at EVERY HudScale instead of drifting as the design
+       space grows. The kBakes deanchor leaves each coord a FIXED design margin from the edge,
+       which shrinks on-screen as design_w/h grow: X creeps off the right; Y's deanchor.bottom
+       drags the box from the top toward mid-screen -> the "too far right / not far up / off the
+       edge" reports. Re-project both X layers (+corner nudge) and both Y layers (screen-const
+       top) so fg+bg stay locked and the corner is HudScale-invariant. Identity at hs1.0. */
+    if (g_cfg.patch_minimap) {
+        float hs = g_cfg.hud_scale; if (!(hs > 0.1f && hs < 10.0f)) hs = 1.0f;
+        float A = s->A, A0 = s->A / hs;                                    /* design_w, native_w */
+        float C = s->C, C0 = s->C / hs;                                    /* design_h, native_h */
+        minimap_corner_pin(0x00A11324u, 0, A, A0, g_cfg.minimap_nudge_x);  /* viewport   X (+nudge) */
+        minimap_corner_pin(0x00A113E8u, 1, A, A0, g_cfg.minimap_nudge_x);  /* background X */
+        minimap_corner_pin(0x00A1133Cu, 2, C, C0, 0.0f);                   /* viewport   Y (top)    */
+        minimap_corner_pin(0x00A113F4u, 3, C, C0, 0.0f);                   /* background Y */
     }
 }
 
@@ -4020,8 +4054,8 @@ static void apply_static_patches(const ws_scale_ctx *s)
     // gradient widths/colors that now live entirely in kBakes[] (applied above).
 
     // (4) psobb.io patch-server news/status screen (Trinity AdDrawLineTask
-    // @0x00408C9D): right/bottom-anchor the MOTD box geometry. This stays a
-    // CALL/code patch (not a flat .data write), so it is NOT in kBakes[].
+    // @0x00408C9D): right/bottom-anchor the MOTD box geometry.
+    // [RESTORED 2026-06-22 — full overnight revert after the prune broke the front-end.]
     patch_ad_draw_line(s);
 
     // (Char-create class-select layout is an authoritative-source bake now —
@@ -4114,17 +4148,26 @@ static void worker_scale_poke(int in_game)
 {
     if (!in_game) return;                          // front-end: leave to W1 + static bake
 
-    float hs = g_cfg.hud_scale;
-    if (!(hs > 0.1f && hs < 10.0f)) hs = 1.0f;
+    // Canonical design dims straight from the scale ctx — they already carry game_aspect AND
+    // hud_scale (= ws_compute_scale s->A/s->C = the front-end bake = Ephinea Stage-B). NOT a
+    // local 16:9 recompute (which mis-scaled real 4:3), and NOT the stale in-game globals (the
+    // FE->IG transition resets [0x0098A4B8]/[0x00ACC0E8] toward stock 640 / identity 1.0).
+    float dw = g_scale.A;                                 // 853.333*hud_scale @16:9
+    float dh = g_scale.C;                                 // 480*hud_scale
+    if (!(dw > 1.0f && dh > 1.0f)) return;
 
-    const float aspect = 16.0f / 9.0f;
-    float dw  = (aspect / (4.0f / 3.0f)) * 640.0f * hs;  // 1280 @hs1.5
-    float dh  = 480.0f * hs;                             //  720 @hs1.5
-    float aff = 1920.0f / dw;                            //  1.5 @hs1.5
+    // affine = render_w/design_w — the LIVE backbuffer extent (== the VPEXT numerator the
+    // engine's own front-end setter @0x0082F49A divides by), so in-game reproduces the
+    // front-end affine and FILLS exactly at EVERY HudScale (design*affine == render). Reading
+    // the real backbuffer (not a hardcoded 1920) is what fixes the >1080p under-fill.
+    float rw = (float)g_scale.render_w; if (!(rw > 1.0f)) rw = 1920.0f;
+    float rh = (float)g_scale.render_h; if (!(rh > 1.0f)) rh = rw * (dh / dw);
+    float aff_x = rw / dw;
+    float aff_y = rh / dh;
     hs_poke_f32(HS_VA_DESIGN_W, dw);
     hs_poke_f32(HS_VA_DESIGN_H, dh);
-    hs_poke_f32(HS_VA_AFFINE_X, aff);
-    hs_poke_f32(HS_VA_AFFINE_Y, aff);              // SCALE_Y clamped = SCALE_X
+    hs_poke_f32(HS_VA_AFFINE_X, aff_x);
+    hs_poke_f32(HS_VA_AFFINE_Y, aff_y);
 }
 
 // ---- reassert_ingame_hooks — re-install wiped detours ------
@@ -4180,8 +4223,10 @@ static void ingame_reassert_on_transition(void)
         if (!ig)              s_pending = 0;    // back to front-end: disarm
         if (s_pending && ig && !loading) {      // fire once, after the area loads
             reassert_ingame_hooks();            // deanchor + ListWindow-Y redirects
-            if (!(g_cfg.hud_scale > 0.999f && g_cfg.hud_scale < 1.001f))
-                worker_scale_poke(1);           // design_w/h + affine pin
+            if (g_scale.enabled)
+                worker_scale_poke(1);           // design_w/h + affine pin (runs at hs==1.0 too:
+                                                // the FE->IG transition resets the in-game affine
+                                                // to identity, so 1.0 STILL needs re-pinning to fill)
             s_pending = 0;
         }
         s_prev_ig = ig;
