@@ -79,6 +79,15 @@ void mod_video_init(const char *path, int enabled, int skippable,
 //   viewport_h  cached backbuffer height (g_last_vp_h)
 void mod_video_on_present(void *device, int viewport_w, int viewport_h);
 
+// Lost-device discipline. Called from the IDirect3DDevice8::Reset hook
+// (Hook_Reset in pso_widescreen.c) around the engine's device Reset on an
+// alt-tab / fullscreen-toggle under dgVoodoo2. on_device_lost runs BEFORE the
+// real Reset (releases the device-bound state block + frame texture);
+// on_device_reset runs AFTER a SUCCESSFUL Reset (resources recreate lazily on
+// the next on_present). Both are no-ops when disabled and idempotent.
+void mod_video_on_device_lost(void);
+void mod_video_on_device_reset(void);
+
 // Closing diagnostics on DLL_PROCESS_DETACH (safe under DllMain).
 void mod_video_log_summary(void);
 

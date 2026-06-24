@@ -173,7 +173,10 @@ typedef IDirect3D8 *(WINAPI *Direct3DCreate8_t)(UINT SDKVersion);
 // We read these once at DllMain attach. There's no live-reload because
 // CreateDevice fires very early in PSOBB startup (before any user could
 // have edited the config) and changing resolution mid-flight requires
-// IDirect3DDevice8::Reset, which we don't intercept.
+// IDirect3DDevice8::Reset. (We DO now intercept Reset — see Hook_Reset — but
+// only for lost-device resource discipline on alt-tab, NOT to re-read cfg or
+// change resolution; the present-params are left exactly as the engine built
+// them.)
 
 static struct {
     int   enabled;            // master switch — default 0, set to 1 in cfg
@@ -478,6 +481,9 @@ extern void boot_poster_init_from_cfg(const char *path, int enabled,
                                       int disable_after_splash_atlas,
                                       int max_seconds, float max_screen_pct);
 extern void boot_poster_on_present(void *device, int viewport_w, int viewport_h);
+// Lost-device bridges (alt-tab / dgVoodoo2 Reset) — called from Hook_Reset.
+extern void boot_poster_on_device_lost(void);
+extern void boot_poster_on_device_reset(void);
 extern void boot_poster_log_summary(void);
 
 // ---- P3 video bridge (defined in mod_video.c) ----
@@ -495,6 +501,9 @@ extern void mod_video_init(const char *path, int enabled, int skippable,
                            int skip_debounce_ms, int audio, int diag,
                            int trigger, int decoder);
 extern void mod_video_on_present(void *device, int viewport_w, int viewport_h);
+// Lost-device bridges (alt-tab / dgVoodoo2 Reset) — called from Hook_Reset.
+extern void mod_video_on_device_lost(void);
+extern void mod_video_on_device_reset(void);
 extern void mod_video_log_summary(void);
 
 // ---- Logging ----
@@ -1110,6 +1119,33 @@ typedef HRESULT (STDMETHODCALLTYPE *Present_t)(
     IDirect3DDevice8 *self, const RECT *pSrc, const RECT *pDst,
     HWND hOverride, void *pDirtyRegion);
 
+// IDirect3DDevice8::Reset — slot 14 (the slot immediately before Present=15 in
+// the canonical d3d8 IDirect3DDevice8 vtable; consistent with this file's
+// "slot 15 = Present"). PSOBB recreates the device's swap chain on a
+// resolution / fullscreen change — and, critically, dgVoodoo2 issues a Reset on
+// alt-tab in virtual fullscreen (device-lost recovery). A Reset INVALIDATES
+// every D3DPOOL_DEFAULT resource and every device-state object (state blocks),
+// so our overlay modules must drop their device-bound resources before it and
+// recreate them after. Signature mirrors CreateDevice's pp pointer type.
+typedef HRESULT (STDMETHODCALLTYPE *Reset_t)(
+    IDirect3DDevice8 *self, D3DPRESENT_PARAMETERS_X *pPresentationParameters);
+
+// IDirect3DDevice8::TestCooperativeLevel — slot 3 (canonical: after
+// QueryInterface/AddRef/Release at 0..2). Returns D3D_OK when the device is
+// usable, D3DERR_DEVICELOST while it is lost (cannot render — e.g. mid alt-tab),
+// or D3DERR_DEVICENOTRESET once it is recoverable but Reset has not run yet. We
+// poll it in Hook_Present to skip our overlay blits on a non-usable device.
+typedef HRESULT (STDMETHODCALLTYPE *TestCooperativeLevel_t)(
+    IDirect3DDevice8 *self);
+
+// d3d8 device-lost HRESULTs (D3DERR_* from d3d8.h; stable since DX8).
+#ifndef D3DERR_DEVICELOST
+#define D3DERR_DEVICELOST     0x88760868u
+#endif
+#ifndef D3DERR_DEVICENOTRESET
+#define D3DERR_DEVICENOTRESET 0x88760869u
+#endif
+
 static Direct3DCreate8_t real_Direct3DCreate8 = NULL;
 static CreateDevice_t    real_CreateDevice    = NULL;
 static SetTransform_t    real_SetTransform    = NULL;
@@ -1118,6 +1154,7 @@ static SetVertexShader_t real_SetVertexShader = NULL;
 static DrawPrimitiveUP_t real_DrawPrimitiveUP = NULL;
 static DrawIndexedPrimitiveUP_t real_DrawIndexedPrimitiveUP = NULL;
 static Present_t         real_Present         = NULL;
+static Reset_t           real_Reset           = NULL;
 static int               g_last_vp_w          = 0;  // last SetViewport-observed dims
 static int               g_last_vp_h          = 0;
 static int               g_vtable_patched     = 0;
@@ -1330,6 +1367,75 @@ static void ingame_reassert_on_transition(void);
 // does NOT touch 0x004F4FA5 or 0x0091E3F4 — both stay stock 315.0. The Present-driven
 // call site is removed too.
 
+// Returns 1 if the device is currently in a usable (renderable) state, 0 if it
+// is lost / not-yet-reset (mid alt-tab under dgVoodoo2). We poll
+// TestCooperativeLevel (slot 3) so our overlay blits never run against a lost
+// device. SEH-firewalled and fail-OPEN: if the call itself faults or
+// real_Present hasn't been captured yet we assume usable (1) — the engine's own
+// Present + the overlay modules' internal SEH still backstop us, and we must
+// never wedge the normal-case overlay just because a wrapper returned something
+// unexpected from TestCooperativeLevel.
+static int device_is_usable(IDirect3DDevice8 *self)
+{
+    if (!self) return 0;
+    int usable = 1;
+    __try {
+        void **vt = *(void ***)self;
+        TestCooperativeLevel_t fnTCL = (TestCooperativeLevel_t)vt[3];
+        HRESULT hr = fnTCL(self);
+        if ((DWORD)hr == D3DERR_DEVICELOST || (DWORD)hr == D3DERR_DEVICENOTRESET)
+            usable = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        usable = 1;   // fail open
+    }
+    return usable;
+}
+
+// IDirect3DDevice8::Reset (slot 14) — the missing lost-device hook. PSOBB (and
+// dgVoodoo2 on alt-tab in virtual fullscreen) Resets the device on a
+// resolution / fullscreen change; a Reset invalidates every D3DPOOL_DEFAULT
+// resource and every device-state object. Discipline:
+//   1. BEFORE forwarding, tell each overlay module to drop its device-bound
+//      resources (state block, frame texture) via *_on_device_lost().
+//   2. Forward to the real Reset.
+//   3. On SUCCESS, let each module know it can recreate (lazily) via
+//      *_on_device_reset(). On FAILURE (device still lost — e.g. still
+//      minimized) we leave resources released; the next successful Reset (or
+//      lazy recreate on the next usable Present) brings them back.
+// SEH-firewalled the same way as the other device hooks: a wrapper quirk here
+// must never poison the engine's device recovery.
+static HRESULT STDMETHODCALLTYPE Hook_Reset(
+    IDirect3DDevice8 *self, D3DPRESENT_PARAMETERS_X *pp)
+{
+    log_line("[pso_widescreen] Reset: releasing overlay device resources "
+             "(BB %ux%u, windowed=%d)",
+             pp ? (unsigned)pp->BackBufferWidth  : 0u,
+             pp ? (unsigned)pp->BackBufferHeight : 0u,
+             pp ? (int)pp->Windowed : -1);
+    __try {
+        boot_poster_on_device_lost();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try {
+        mod_video_on_device_lost();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    HRESULT hr = real_Reset ? real_Reset(self, pp) : E_FAIL;
+
+    if (SUCCEEDED(hr)) {
+        log_line("[pso_widescreen] Reset OK — overlay resources will recreate lazily");
+        __try {
+            boot_poster_on_device_reset();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try {
+            mod_video_on_device_reset();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    } else {
+        log_line("[pso_widescreen] Reset returned 0x%08lx — device still lost; "
+                 "leaving overlay resources released", (unsigned long)hr);
+    }
+    return hr;
+}
+
 // Present (slot 15) — render the boot poster ONTO the current backbuffer
 // before the engine flips it. The boot_poster module checks its own
 // auto-disable conditions on each call, so once any condition trips this
@@ -1340,19 +1446,29 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
 {
     // (FIX-A char-create description-text bake REMOVED — Ephinea-fidelity pass.
     // 0x004F4FA5 / 0x0091E3F4 stay stock 315.0; no Present-driven text poke.)
-    __try {
-        boot_poster_on_present((void *)self, g_last_vp_w, g_last_vp_h);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Boot poster handler swallows its own exceptions internally;
-        // this is just an extra firewall so a wrapper-specific edge case
-        // never poisons the engine's Present.
-    }
-    // P3 video (Stage 1). Cheap `if(!enabled) return;` no-op when disabled,
-    // so VideoEnable=0 (default) is byte-identical to today. SEH-firewalled
-    // the same way as the boot poster (mod_video also wraps internally).
-    __try {
-        mod_video_on_present((void *)self, g_last_vp_w, g_last_vp_h);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    //
+    // LOST-DEVICE GUARD: on alt-tab in virtual fullscreen, dgVoodoo2 drops the
+    // device (TestCooperativeLevel -> D3DERR_DEVICELOST / DEVICENOTRESET) and
+    // our overlay resources are released until the Reset hook recreates them.
+    // Blitting against a lost device (or a just-released/null texture) is the
+    // classic AV. Skip BOTH overlays while the device is not usable and pass
+    // straight through to the engine's Present, which itself returns DEVICELOST
+    // harmlessly. The overlays resume automatically once the device is reset.
+    if (device_is_usable(self)) {
+        __try {
+            boot_poster_on_present((void *)self, g_last_vp_w, g_last_vp_h);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Boot poster handler swallows its own exceptions internally;
+            // this is just an extra firewall so a wrapper-specific edge case
+            // never poisons the engine's Present.
+        }
+        // P3 video (Stage 1). Cheap `if(!enabled) return;` no-op when disabled,
+        // so VideoEnable=0 (default) is byte-identical to today. SEH-firewalled
+        // the same way as the boot poster (mod_video also wraps internally).
+        __try {
+            mod_video_on_present((void *)self, g_last_vp_w, g_last_vp_h);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
     }
     // black-quadrant diagnostic (one-shot): the reparent wall
     // renders each quadrant's content into a top-left sub-rect with black
@@ -1562,6 +1678,8 @@ static HRESULT STDMETHODCALLTYPE Hook_DrawIndexedPrimitiveUP(
 // CreateDevice. The vtable is shared across all IDirect3DDevice8
 // instances created by the same IDirect3D8 factory, so one patch
 // covers the whole process. We patch:
+// slot 14 = Reset                  (lost-device discipline: drop+recreate the
+//                                   overlay's device-bound resources on alt-tab)
 // slot 15 = Present                (boot poster pre-flip overlay)
 // slot 37 = SetTransform           (FOV / aspect correction)
 // slot 40 = SetViewport            (full-backbuffer override)
@@ -1587,6 +1705,22 @@ static void patch_device_vtable(IDirect3DDevice8 *dev)
                      (void*)real_Present);
         } else {
             log_line("[pso_widescreen] device vtable[15] VirtualProtect FAILED err=%lu",
+                     GetLastError());
+        }
+        // Reset (slot 14) — paired with the Present overlay lifecycle. Only the
+        // overlay modules hold device-bound resources that a Reset invalidates,
+        // so the Reset hook is armed under the same gate. Without this hook an
+        // alt-tab under dgVoodoo2 Resets the device while our state block /
+        // textures stay stale -> the AddRef/blit AVs in the wrapper.
+        if (VirtualProtect(&vt[14], sizeof(void*), PAGE_READWRITE, &old_prot)) {
+            real_Reset = (Reset_t)vt[14];
+            vt[14] = (void *)&Hook_Reset;
+            DWORD tmp = 0;
+            VirtualProtect(&vt[14], sizeof(void*), old_prot, &tmp);
+            log_line("[pso_widescreen] device vtable[14] patched: real Reset=0x%p",
+                     (void*)real_Reset);
+        } else {
+            log_line("[pso_widescreen] device vtable[14] VirtualProtect FAILED err=%lu",
                      GetLastError());
         }
     }

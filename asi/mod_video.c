@@ -3095,6 +3095,83 @@ void mod_video_on_present(void *device, int viewport_w, int viewport_h)
     }
 }
 
+// ---- Lost-device discipline (alt-tab / dgVoodoo2 Reset) -------------------
+//
+// On a device-lost event (alt-tab in virtual fullscreen drops the D3D8 device;
+// dgVoodoo2 then Resets it) the engine's IDirect3DDevice8::Reset hook
+// (Hook_Reset in pso_widescreen.c) calls these bridges. Reset INVALIDATES every
+// device-state object and every D3DPOOL_DEFAULT resource. Our overlay holds two
+// device-bound things:
+//   * the D3DSBT_ALL state block (sb_token, created by CreateStateBlock) — a
+//     device-state object that is INVALID after a Reset; Capturing/Applying a
+//     stale token is exactly the kind of op that AVs inside the wrapper.
+//   * the frame texture (g_video.texture) — D3DPOOL_MANAGED, so the runtime
+//     would re-upload it itself, but we drop+recreate it anyway so we never
+//     hand the wrapper a handle from across a Reset boundary, and so a
+//     backbuffer-size change re-sizes it cleanly on the next session.
+//
+// We do NOT tear down the decode session (ffmpeg/MF reader, ring buffers, audio)
+// — none of that is device-bound; the next vid_present_body re-creates the
+// texture and state block lazily (sb_tried=0 -> recreate; texture==NULL ->
+// recreate) and continues the clip across the alt-tab.
+//
+// on_device_lost runs BEFORE real_Reset (resources must be gone before Reset);
+// on_device_reset runs AFTER a SUCCESSFUL Reset. Both are SEH-firewalled and
+// idempotent — safe to call when nothing is allocated.
+void mod_video_on_device_lost(void)
+{
+    if (!g_video.enabled) return;
+    log_line("[video] on_device_lost: releasing state block + frame texture");
+    // Release the D3DSBT_ALL state block via its owning device (sb_dev), which
+    // is still the live COM object across a Reset (Reset keeps the same device).
+    if (g_video.sb_have && g_video.sb_dev) {
+        __try {
+            void **dvt = *(void ***)g_video.sb_dev;
+            DeleteStateBlock_t fnDelete = (DeleteStateBlock_t)dvt[56];
+            fnDelete((IDirect3DDevice8 *)g_video.sb_dev, g_video.sb_token);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* swallow */ }
+    }
+    g_video.sb_have  = 0;
+    g_video.sb_tried = 0;     // force lazy re-create on the next capture
+    g_video.sb_token = 0;
+    g_video.sb_dev   = NULL;
+    g_video.save_method_logged = 0;
+    g_vid_saved.valid = 0;
+    // Release any stray AddRef the manual save path may hold (normally NULL).
+    if (g_vid_saved.tex0) {
+        __try {
+            void **tvt = *(void ***)g_vid_saved.tex0;
+            IUnknown_Release_t fnRelease = (IUnknown_Release_t)tvt[2];
+            fnRelease(g_vid_saved.tex0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* swallow */ }
+        g_vid_saved.tex0 = NULL;
+    }
+    // Drop the frame texture so it is recreated (and re-sized to the post-Reset
+    // backbuffer if the dims changed) on the next vid_ensure_texture.
+    if (g_video.texture) {
+        __try {
+            void **tvt = *(void ***)g_video.texture;
+            IUnknown_Release_t fnRelease = (IUnknown_Release_t)tvt[2];
+            fnRelease(g_video.texture);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* swallow */ }
+        g_video.texture = NULL;
+        g_video.tex_w = g_video.tex_h = 0;
+        g_video.last_uploaded_index = -1;
+    }
+}
+
+void mod_video_on_device_reset(void)
+{
+    if (!g_video.enabled) return;
+    // Nothing to allocate here: the texture and state block are recreated lazily
+    // by the next vid_present_body (texture==NULL -> recreate; sb_tried==0 ->
+    // recreate). This bridge exists so the Reset hook has a symmetric "after"
+    // call and so future device-bound resources have a home. The lazy paths
+    // re-fetch the device pointer fresh from the Present hook each frame, so a
+    // changed device is picked up without caching anything stale here.
+    log_line("[video] on_device_reset: resources will recreate lazily next frame");
+}
+
 void mod_video_log_summary(void)
 {
     log_line("[video] summary: present_calls=%ld disabled_perm=%d playing=%ld "

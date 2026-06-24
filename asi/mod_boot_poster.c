@@ -546,6 +546,38 @@ void boot_poster_on_present(void *device, int viewport_w, int viewport_h)
     }
 }
 
+// ---- Lost-device discipline (alt-tab / dgVoodoo2 Reset) -------------------
+//
+// Called from the IDirect3DDevice8::Reset hook (Hook_Reset in pso_widescreen.c)
+// around the engine's device Reset. The boot poster's ONLY device resource is
+// g_bp.texture, created in D3DPOOL_MANAGED. A managed-pool texture is
+// Reset-RESILIENT: the D3D runtime keeps a system-memory backing copy and
+// re-uploads it to VRAM automatically after a Reset, so it stays valid across an
+// alt-tab without any action from us.
+//
+// Crucially we must NOT release it on device-lost: bp_upload_texture frees the
+// CPU-side pixel buffer (g_bp.rgba) right after the one-time upload (to reclaim
+// the RGBA), so once uploaded there is no source left to re-upload from — a
+// release would permanently lose the poster with no recreate path. So
+// on_device_lost is a deliberate no-op for the managed texture; we only clear a
+// transient if one ever existed. on_device_reset is likewise a no-op (managed
+// re-upload is automatic). Both bridges exist for symmetry with mod_video and so
+// the Reset hook can drive every overlay module uniformly.
+void boot_poster_on_device_lost(void)
+{
+    if (!g_bp.enabled) return;
+    // Managed-pool texture survives Reset; releasing it would lose the only copy
+    // (g_bp.rgba was freed after upload). Intentionally nothing to release here.
+    log_line("[boot_poster] on_device_lost: managed texture is Reset-resilient (no-op)");
+}
+
+void boot_poster_on_device_reset(void)
+{
+    if (!g_bp.enabled) return;
+    // Managed-pool re-upload is automatic after a successful Reset; nothing to do.
+    log_line("[boot_poster] on_device_reset: managed texture re-uploads automatically (no-op)");
+}
+
 void boot_poster_log_summary(void)
 {
     log_line("[boot_poster] summary: present_calls=%ld disabled_perm=%d "
