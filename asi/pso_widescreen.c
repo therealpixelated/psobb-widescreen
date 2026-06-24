@@ -354,6 +354,15 @@ static struct {
     // (0x00A113E8). Equal delta on both keeps fg+bg locked (fixes the desync) while
     // shifting the whole minimap toward the corner. Positive = right. INI: MinimapNudgeX.
     float minimap_nudge_x;     // default +48.0 (push right toward the corner). 0 = no nudge.
+    // CUSTOM C3 (owner nudge 2026-06-24) — vertical + per-layer minimap placement.
+    // minimap_nudge_y: equal delta on BOTH Y layers (negative = move the whole minimap
+    //   UP). Moves the gray-box AND the map together toward the top-right.
+    // minimap_vp_dx / minimap_vp_dy: EXTRA delta applied to the VIEWPORT (map graphic)
+    //   layer ONLY, on top of the shared nudge — negative dx = map LEFT, negative dy =
+    //   map UP, relative to the gray-box. Lets the map sit higher/left inside the box.
+    float minimap_nudge_y;     // default -28.0 (whole minimap up). INI: MinimapNudgeY.
+    float minimap_vp_dx;       // default -16.0 (map graphic left).  INI: MinimapVpDX.
+    float minimap_vp_dy;       // default -12.0 (map graphic up).    INI: MinimapVpDY.
     // REFACTOR: patch_phase3 (0x0082B440 splash inline hook),
     // patch_title_art (0x82BB74 push-imm sites) and patch_title_real /
     // title_real_mode (the 8 imm32 0x006f4cf2..0x006f4d66 rewrites) are
@@ -601,6 +610,9 @@ static void load_config(void)
     g_cfg.minimap_vp_y        =  83.0f;
     g_cfg.minimap_zoom        =  0.53f;
     g_cfg.minimap_nudge_x     =  48.0f;   // C3: nudge minimap right toward the corner.
+    g_cfg.minimap_nudge_y     = -28.0f;   // C3 (owner): whole minimap UP toward the top corner.
+    g_cfg.minimap_vp_dx       = -16.0f;   // C3 (owner): map graphic LEFT (inside the gray box).
+    g_cfg.minimap_vp_dy       = -12.0f;   // C3 (owner): map graphic UP (inside the gray box).
     g_cfg.patch_flare_scale   = 0;     // 2026-05-26: opt-in (default OFF) until
                                        // in-game effect-type-0 safety is checked.
     g_cfg.flare_scale         = 6.0f;  // 1.5× of the stock 4.0 descriptor scale.
@@ -762,6 +774,9 @@ static void load_config(void)
             if (z >= 0.1f && z <= 3.0f) g_cfg.minimap_zoom = z;
         }
         else if (_stricmp(key, "MinimapNudgeX")     == 0) g_cfg.minimap_nudge_x = (float)atof(val);
+        else if (_stricmp(key, "MinimapNudgeY")     == 0) g_cfg.minimap_nudge_y = (float)atof(val);
+        else if (_stricmp(key, "MinimapVpDX")       == 0) g_cfg.minimap_vp_dx   = (float)atof(val);
+        else if (_stricmp(key, "MinimapVpDY")       == 0) g_cfg.minimap_vp_dy   = (float)atof(val);
         else if (_stricmp(key, "PatchFlareScale")   == 0) g_cfg.patch_flare_scale = atoi(val);
         else if (_stricmp(key, "FlareScale")        == 0) {
             float s = (float)atof(val);
@@ -2911,7 +2926,9 @@ static const bake_t kBakes[] = {
 /* fields: va, kind, base, coeff, offset, src, gate, stock, note, base2 */
   /* ---- SRC_ANZZ1 : 566 rows ---- */
   { 0x004011C0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
-  { 0x009712DC, K_SET, B_C, -1.0f, 720.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
+  /* REMOVED 2026-06-24: 0x009712DC anzz1.hard (=720-C, a hard-coded letterbox-edge
+     constant). NOT in Ephinea's json. The adjacent 0x009712EC (StageC_scalar, =gameRenderH)
+     IS in json and is kept. */
   { 0x009A3844, K_U32, B_D, 3.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A384C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3858, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
@@ -2925,35 +2942,17 @@ static const bake_t kBakes[] = {
   { 0x009A38BC, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38C4, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38D8, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  { 0x004EC0BE, K_SET, B_C, 1.0f, 12.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F60000, "dr.honeycomb.bottom.y MOD_Y_B (stock 492)", B_LIT },
-  { 0x00790AF5, K_SET, B_A, 0.5f, -160.0f, SRC_TRINITY, GATE_ALWAYS, 0x43200000, "cfg.kbd_overwrite_custom_settings.x (.text MOD_X_C)", B_LIT },
-  { 0x00799ECA, K_SET, B_A, 0.5f, -140.0f, SRC_TRINITY, GATE_ALWAYS, 0x43340000, "cfg.leave_team_confirm.x (.text MOD_X_C)", B_LIT },
-  { 0x0091DC84, K_SET, B_C, 1.0f, -84.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C60000, "dr.inputname.field.y MOD_Y_B (stock 396)", B_LIT },
-  { 0x0096E52C, K_SET, B_A, 1.0f, 40.0f, SRC_TRINITY, GATE_ALWAYS, 0x442A0000, "fe.fixedchat.next.x MOD_X_R +right (stock 680)", B_LIT },
-  { 0x00970FF0, K_SET, B_C, 1.0f, -550.0f, SRC_TRINITY, GATE_ALWAYS, 0xC28C0000, "fe.ime.id.y MOD_Y_B (stock -70)", B_LIT },
-  { 0x00971350, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.party_mode_submenu.x (MOD_X_C)", B_LIT },
-  { 0x00971358, K_SET, B_A, 0.5f, 69.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C28000, "ig.create_party.difficulty_submenu.x (MOD_X_C)", B_LIT },
-  { 0x00972070, K_SET, B_A, 0.5f, -188.0f, SRC_TRINITY, GATE_ALWAYS, 0x43040000, "ig.battle_result.x (MOD_X_C)", B_LIT },
-  { 0x009721E0, K_SET, B_A, 0.5f, -169.0f, SRC_TRINITY, GATE_ALWAYS, 0x43170000, "ig.in_battle_description.x (MOD_X_C)", B_LIT },
-  { 0x009721F8, K_SET, B_A, 0.5f, -32.0f, SRC_TRINITY, GATE_ALWAYS, 0x43900000, "ig.cmode_reward_dialog.x (MOD_X_C)", B_LIT },
-  { 0x00972200, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.cmode_srank_name_dialog.x (MOD_X_C)", B_LIT },
-  { 0x00972208, K_SET, B_A, 0.5f, 39.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B38000, "ig.cmode_reward_dialog_submenu.x (MOD_X_C)", B_LIT },
-  { 0x00972510, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_CHARSELECT, 0x43870000, "lobby.soccer.score.x (MOD_X_C: stock270 + (A-640)/2)", B_LIT },
-  { 0x00972538, K_SET, B_A, 0.5f, -139.0f, SRC_TRINITY, GATE_ALWAYS, 0x43350000, "ig.info_counter_create_party.x (MOD_X_C)", B_LIT },
-  { 0x00972568, K_SET, B_A, 1.0f, -245.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C58000, "ig.battle_disconnect_dlg.x (MOD_X_R)", B_LIT },
-  { 0x009725D8, K_SET, B_A, 0.5f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43828000, "ig.cmode_srank_name_caret.x (MOD_X_C)", B_LIT },
-  { 0x009725F0, K_SET, B_A, 0.5f, -279.0f, SRC_TRINITY, GATE_CHARSELECT, 0x42240000, "shipsel.login-error.x (MOD_X_C: stock41 + (A-640)/2)", B_LIT },
-  { 0x009725F4, K_SET, B_C, 0.5f, -112.0f, SRC_TRINITY, GATE_ALWAYS, 0x43000000, "shipselect.loginerror.y MOD_Y_C +half (stock 128)", B_LIT },
-  { 0x009725F8, K_SET, B_A, 0.5f, -221.0f, SRC_TRINITY, GATE_ALWAYS, 0x42C60000, "ig.join_room_password_request.x (MOD_X_C)", B_LIT },
-  { 0x00972600, K_SET, B_A, 0.5f, -211.0f, SRC_TRINITY, GATE_ALWAYS, 0x42DA0000, "ig.join_room_password_caret.x (MOD_X_C)", B_LIT },
-  { 0x00972638, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_name_field.x (MOD_X_C)", B_LIT },
-  { 0x00972640, K_SET, B_A, 0.5f, 37.0f, SRC_TRINITY, GATE_ALWAYS, 0x43B28000, "ig.create_party_password_field.x (MOD_X_C)", B_LIT },
-  { 0x00972688, K_SET, B_A, 0.5f, -289.0f, SRC_TRINITY, GATE_ALWAYS, 0x41F80000, "ig.team_invitation_explanation.x (MOD_X_C)", B_LIT },
-  { 0x00979BCC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_texture.x (MOD_X_C; offset 0)", B_LIT },
-  { 0x0097E458, K_SET, B_C, 1.0f, -90.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C30000, "fe.login.botright.y MOD_Y_B (stock 390)", B_LIT },
-  { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_TRINITY, GATE_ALWAYS, 0x44084000, "fe.login.botright.x MOD_X_R +right (stock 545)", B_LIT },
-  { 0x009F24E4, K_SET, B_A, 0.5f, 168.0f, SRC_TRINITY, GATE_ALWAYS, 0x43F40000, "ig.team_invitation_explanation_submenu.x (MOD_X_C)", B_LIT },
-  { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "ig.battle_countdown_bg_texture.x (MOD_X_C; offset 0)", B_LIT },
+  /* ===== REMOVED 2026-06-24 — 29 SRC_TRINITY MOD_X/Y over-patches =====
+     These front-end / in-game menu X/Y anchors are NOT in Ephinea's authoritative
+     cascade VA set (_eph_patchset.json). Ephinea leaves these dialogs at their
+     cascade-derived positions; our Trinity-reference flat recenters were over-patching
+     (the owner explicitly named 0x0091DC84 and 0x00970FF0). Removed VAs: 0x004EC0BE,
+     0x00790AF5, 0x00799ECA, 0x0091DC84, 0x0096E52C, 0x00970FF0, 0x00971350, 0x00971358,
+     0x00972070, 0x009721E0, 0x009721F8, 0x00972200, 0x00972208, 0x00972510, 0x00972538,
+     0x00972568, 0x009725D8, 0x009725F0, 0x009725F4, 0x009725F8, 0x00972600, 0x00972638,
+     0x00972640, 0x00972688, 0x00979BCC, 0x0097E458, 0x0097E468, 0x009F24E4, 0x009F986C.
+     (The 27 OTHER SRC_TRINITY rows that ARE in the json are kept verbatim — they're real
+     Ephinea cascade VAs that happened to carry a Trinity attribution.) */
   { 0x004011D2, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x004011DD, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x004011EF, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
@@ -3170,6 +3169,18 @@ static const bake_t kBakes[] = {
   { 0x0091FC74, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x0091FF90, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x0091FF94, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  /* StageC_tail — the in-game menu-dim / letterbox-bar GEOMETRY EXTENT (Ephinea
+     FUN_52da7ff0 edge/frame). These 4 .data floats are the right/bottom corners of
+     the fullscreen dark quad, expressed in DISPLAY pixels (render_w/h), NOT 4:3 design:
+       0x0091FF30 / 0x0091FF00 : displayW + 100  (stock 740 = 640+100 @4:3 -> no-op)
+       0x0091FF2C / 0x0091FEFC : displayH + 100  (stock 580 = 480+100 @4:3 -> no-op)
+     With StageC_color (above) this is THE bottom-bar fix: the bar's extent now reaches
+     the true monitor edge instead of being sized off a 4:3 ceiling (over-tall black box).
+     B_RW/B_RH = render px (the logical/physical canvas == Ephinea's displayW/H). */
+  { 0x0091FF30, K_SET, B_RW, 1.0f, 100.0f, SRC_EPHINEA, GATE_ALWAYS, 0x44390000, "StageC_tail.rect.r", B_LIT },
+  { 0x0091FF00, K_SET, B_RW, 1.0f, 100.0f, SRC_EPHINEA, GATE_ALWAYS, 0x44390000, "StageC_tail.rect.r", B_LIT },
+  { 0x0091FF2C, K_SET, B_RH, 1.0f, 100.0f, SRC_EPHINEA, GATE_ALWAYS, 0x44110000, "StageC_tail.rect.b", B_LIT },
+  { 0x0091FEFC, K_SET, B_RH, 1.0f, 100.0f, SRC_EPHINEA, GATE_ALWAYS, 0x44110000, "StageC_tail.rect.b", B_LIT },
   { 0x00920050, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x00920104, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x00920108, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
@@ -3463,14 +3474,23 @@ static const bake_t kBakes[] = {
      (same written value, now stock-guarded). 0x009B8D08/D50 are NOT here: they're written
      at runtime by the .text imms at 0x004EB4AA/0x004EB4F0 (already in kBakes as hud.w). */
   { 0x009B8DC4, K_SET, B_A, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x44200000, "csel.grad.w", B_LIT },
-  /* char-select right-gradient COLOR bytes (Ephinea). K_U8 = 1-byte literal write; value
-     = coeff (base==B_LIT). stock = the stock byte for the sig-guard (skip if it doesn't match). */
-  { 0x009B8DB7, K_U8, B_LIT, 255.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000EC, "csel.grad.color", B_LIT },  /* 0xEC -> 0xFF */
-  { 0x009B8DBB, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
-  { 0x009B8DBF, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
-  { 0x009B8DC3, K_U8, B_LIT, 255.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000EC, "csel.grad.color", B_LIT },  /* 0xEC -> 0xFF */
-  { 0x009B8DEB, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
-  { 0x009B8DEF, K_U8, B_LIT, 250.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x000000FF, "csel.grad.color", B_LIT },  /* 0xFF -> 0xFA */
+  /* StageC_color — the in-game menu-dim / letterbox LETTERBOX-BAR color (Ephinea
+     FUN_52da7ff0 writes these 6 .data DWORDs). ARGB (D3DCOLOR 0xAARRGGBB). RGB is
+     ALREADY dark-gray 0x181818 in stock; Ephinea only raises/normalizes the ALPHA:
+       0x009B8DB4 / 0x009B8DC0 : 0xEC181818 -> 0xFF181818  (fully opaque)
+       0x009B8DB8 / DBC / DE8 / DEC : 0xFF181818 -> 0xFA181818 (alpha 250)
+     GATE_ALWAYS (StageC runs in-game) — this is the row that turns our pure-black
+     over-scaled bottom bar into Ephinea's correct dark-gray letterbox. K_U32 literal
+     SET (offset == the exact target u32; round-trips bit-exact through float because the
+     low 0x181818 fits the f32 mantissa at this magnitude — verified). stock = the stock
+     u32 for the sig-guard. These SUPERSEDE the 6 prior GATE_CHARSELECT alpha-byte pokes
+     (0x009B8DB7/DBB/DBF/DC3/DEB/DEF) which touched only the alpha of these same dwords. */
+  { 0x009B8DB4, K_U32, B_LIT, 0.0f, 4279769112.0f, SRC_EPHINEA, GATE_ALWAYS, 0xEC181818, "StageC_color", B_LIT },  /* ->0xFF181818 */
+  { 0x009B8DC0, K_U32, B_LIT, 0.0f, 4279769112.0f, SRC_EPHINEA, GATE_ALWAYS, 0xEC181818, "StageC_color", B_LIT },  /* ->0xFF181818 */
+  { 0x009B8DB8, K_U32, B_LIT, 0.0f, 4195883032.0f, SRC_EPHINEA, GATE_ALWAYS, 0xFF181818, "StageC_color", B_LIT },  /* ->0xFA181818 */
+  { 0x009B8DBC, K_U32, B_LIT, 0.0f, 4195883032.0f, SRC_EPHINEA, GATE_ALWAYS, 0xFF181818, "StageC_color", B_LIT },  /* ->0xFA181818 */
+  { 0x009B8DE8, K_U32, B_LIT, 0.0f, 4195883032.0f, SRC_EPHINEA, GATE_ALWAYS, 0xFF181818, "StageC_color", B_LIT },  /* ->0xFA181818 */
+  { 0x009B8DEC, K_U32, B_LIT, 0.0f, 4195883032.0f, SRC_EPHINEA, GATE_ALWAYS, 0xFF181818, "StageC_color", B_LIT },  /* ->0xFA181818 */
   { 0x009B8DDC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009D0040, K_SET, B_A, 0.5f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009D0044, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
@@ -3682,25 +3702,19 @@ static const bake_t kBakes[] = {
      0x00785xx (InitializeEndingViewport), char-select anchor block 0x008F9E-B1
      (FLOAT_008f9xxx, beside the 92-VA block), congrats/results name-X 0x009CA5
      (Trinity-confirmed center), plus align-list 0x009721 + misc fe floats. */
-  { 0x0040934C, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43968000, "fe.menu0409.w", B_LIT },
-  { 0x00409398, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43968000, "fe.menu0409.w", B_LIT },
-  { 0x004093B0, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42480000, "fe.menu0409.w", B_LIT },
-  { 0x004093C8, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42480000, "fe.menu0409.w", B_LIT },
+  /* REMOVED 2026-06-24: 4 "fe.menu0409.w" over-patches (0x0040934C/00409398/004093B0/
+     004093C8 — fcn.00409340 menu X-positions 301/50). NOT in Ephinea's json. The
+     neighbouring 0x0040CAxx "fe.menu040c.w" rows below ARE in json (92VA_L1_Wmul) — kept. */
   { 0x0040CA07, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43540000, "fe.menu040c.w", B_LIT },
   { 0x0040CA40, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43540000, "fe.menu040c.w", B_LIT },
   { 0x0040CA66, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43650000, "fe.menu040c.w", B_LIT },
   { 0x0040CA8C, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43650000, "fe.menu040c.w", B_LIT },
   { 0x0040CAE2, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43CC8000, "fe.menu040c.w", B_LIT },
   { 0x0040CB1E, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43CC8000, "fe.menu040c.w", B_LIT },
-  { 0x00785679, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "ending.vp.w", B_LIT },
-  { 0x007856FB, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "ending.vp.w", B_LIT },
-  { 0x00785737, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x439E0000, "ending.vp.w", B_LIT },
-  { 0x0078574B, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x441A0000, "ending.vp.w", B_LIT },
-  { 0x00785787, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x439E0000, "ending.vp.w", B_LIT },
-  { 0x0078579B, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x441A0000, "ending.vp.w", B_LIT },
-  { 0x00785C0A, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "ending.vp.w", B_LIT },
-  { 0x00785C34, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x41200000, "ending.vp.w", B_LIT },
-  { 0x00785C42, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43AA0000, "ending.vp.w", B_LIT },
+  /* REMOVED 2026-06-24: 9 "ending.vp.w" over-patches (0x00785679..0x00785C42 — the
+     credits/ending InitializeEndingViewport INNER X-positions 100/316/616/340/10). NOT in
+     Ephinea's json; Ephinea scales only the W/H fields of that same function (those W/H VAs
+     are in Loop1_W/Loop2_H and remain patched). These inner positions were over-patching. */
   { 0x008F9EC0, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "csel.block.w", B_LIT },
   { 0x008F9F20, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x4407C000, "csel.block.cx", B_LIT },
   { 0x008FB114, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43A00000, "csel.block.w", B_LIT },
@@ -4028,10 +4042,14 @@ static void apply_special(const ws_scale_ctx *s)
         float hs = g_cfg.hud_scale; if (!(hs > 0.1f && hs < 10.0f)) hs = 1.0f;
         float A = s->A, A0 = s->A / hs;                                    /* design_w, native_w */
         float C = s->C, C0 = s->C / hs;                                    /* design_h, native_h */
-        minimap_corner_pin(0x00A11324u, 0, A, A0, g_cfg.minimap_nudge_x);  /* viewport   X (+nudge) */
-        minimap_corner_pin(0x00A113E8u, 1, A, A0, g_cfg.minimap_nudge_x);  /* background X */
-        minimap_corner_pin(0x00A1133Cu, 2, C, C0, 0.0f);                   /* viewport   Y (top)    */
-        minimap_corner_pin(0x00A113F4u, 3, C, C0, 0.0f);                   /* background Y */
+        /* X: both layers share the corner nudge; the VIEWPORT (map graphic) gets an EXTRA
+           vp_dx (negative = left) so the map sits further left inside the gray box.
+           Y: both layers share nudge_y (negative = whole minimap up); the VIEWPORT gets an
+           EXTRA vp_dy (negative = map up) inside the box. (owner 2026-06-24 nudge.) */
+        minimap_corner_pin(0x00A11324u, 0, A, A0, g_cfg.minimap_nudge_x + g_cfg.minimap_vp_dx);  /* viewport   X (+nudge, left) */
+        minimap_corner_pin(0x00A113E8u, 1, A, A0, g_cfg.minimap_nudge_x);                        /* background X (gray box)     */
+        minimap_corner_pin(0x00A1133Cu, 2, C, C0, g_cfg.minimap_nudge_y + g_cfg.minimap_vp_dy);  /* viewport   Y (up)           */
+        minimap_corner_pin(0x00A113F4u, 3, C, C0, g_cfg.minimap_nudge_y);                        /* background Y (gray box up)  */
     }
 }
 
