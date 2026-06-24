@@ -800,13 +800,61 @@ static volatile DWORD *const g_soundctrl = (volatile DWORD *)(uintptr_t)CC_SOUND
 static DWORD g_soundctrl_saved[4];      // saved 0x00A46C88/8C/90/94 (valid iff armed)
 static volatile LONG g_soundctrl_armed = 0;  // 1 while the four flags are forced 0
 
-// ARM: save the four SOUNDCTRL dwords, then write 0 to silence the engine mixer
-// (BGM + SE + the streamed ADX feed). One-shot per cover (re-arm is a no-op while
-// already armed, so we never overwrite the saved values with our own 0s).
+// ---- ENGINE-BGM / streamed-ADX suppression: StopAllAudio_00815434 ------------
+//
+// AUDIO-LEAK FIX (2026-06-24, disasm-verified). The SOUNDCTRL flags above gate
+// ONLY the by-id DirectSound SE/BGM mixer (getter 0x00483740 = [0x00A46C8C],
+// checked at the top of the play-by-id core 0x00828E4C + STOP-ALL 0x00829AD0).
+// They DO NOT gate the char-create intro BGM: CUBE_OPENING.adx is started in the
+// scene-3 ENTRY ctor 0x007C1640 (via 0x0070F41C -> play_bgm, the BGM player pool)
+// and serviced every frame by 0x0086DBB0 (channel table 0x00AE7F20) with NO
+// SOUNDCTRL check. So zeroing SOUNDCTRL left the ADX audible UNDER the video.
+// Worse, zeroing [0x00A46C8C] turns STOP-ALL into a no-op.
+//
+// The engine's OWN BGM teardown is StopAllAudio_00815434 (__cdecl, no args): it
+// walks the two BGM players (one holds CUBE_OPENING), stops/resets each, and
+// clears the BGM fade globals. It is the primitive ~15 scene-exit sites call, so
+// it is the well-trodden, reversible cut (the next scene's play_bgm restarts BGM
+// normally). It IS gated by get_settings_audio_bgm (one of the SOUNDCTRL flags),
+// so we must call it BEFORE we zero SOUNDCTRL, and we must call it on each owned
+// frame: the ADX starts in the scene-3 ENTRY ctor 0x007C1714 (NOT hooked — the
+// replica only owns the per-frame tick 0x007C1588), which runs AFTER request(3)
+// commits, i.e. AFTER cc_audio_arm. A one-shot at arm would fire before the ADX
+// even starts; the per-owned-frame call (cc_audio_kill_bgm in the replica) catches
+// it on the first cover frame and keeps it silenced for the cover's duration.
+#define CC_STOP_ALL_AUDIO_VA  0x00815434u   // StopAllAudio_00815434 (__cdecl, void)
+
+typedef void (__cdecl *cc_stop_all_audio_fn_t)(void);
+
+// Stop the engine BGM player pool (the only lever that silences the streamed ADX
+// intro). SEH-guarded; safe to call repeatedly (idempotent reset of already-stopped
+// players). Trigger-gated so a non-charcreate build never calls into engine audio.
+static void cc_audio_kill_bgm(void)
+{
+    if (g_video.trigger != VID_TRIGGER_CHARCREATE) return;
+    __try {
+        cc_stop_all_audio_fn_t stop_all =
+            (cc_stop_all_audio_fn_t)(uintptr_t)CC_STOP_ALL_AUDIO_VA;
+        stop_all();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Engine BGM teardown must never crash the cover; swallow.
+    }
+}
+
+// ARM: (1) stop the engine BGM pool — the ONLY lever that silences the streamed
+// ADX intro (SOUNDCTRL does not gate it; see CC_STOP_ALL_AUDIO_VA), called FIRST
+// while SOUNDCTRL is still at its saved values (StopAllAudio is gated by an
+// SOUNDCTRL flag), then (2) save the four SOUNDCTRL dwords + write 0 to silence
+// the by-id DirectSound SE/BGM mixer. One-shot per cover (re-arm is a no-op while
+// already armed, so we never overwrite the saved values with our own 0s). NOTE the
+// per-owned-frame cc_audio_kill_bgm() in the replica is what actually catches the
+// ADX (it starts on scene-3 ENTRY, AFTER this arm); this one-shot only kills any
+// BGM still ringing out from char-select at request(3) time.
 static void cc_audio_arm(void)
 {
     if (g_video.trigger != VID_TRIGGER_CHARCREATE) return;     // only for the cover
     if (InterlockedCompareExchange(&g_soundctrl_armed, 1, 0) != 0) return; // already armed
+    cc_audio_kill_bgm();   // (1) stop BGM pool BEFORE zeroing SOUNDCTRL (which would gate it out)
     __try {
         g_soundctrl_saved[0] = g_soundctrl[0];
         g_soundctrl_saved[1] = g_soundctrl[1];
@@ -936,11 +984,11 @@ static void cc_audio_disarm(void)
 // The slot fns take NO args + use no `this` for our purposes (they read globals);
 // the kept draws are skipped so the `mov ecx,0xACA2E4` ECX setup is irrelevant.
 #define CC_SCENE3_UPDATE_VA   0x007C1588u
-#define CC_S3_DEV_SNAPSHOT    0x007BECD4u   // [DEV]   KEEP — shared input-device snapshot
-#define CC_S3_PAD_AGG         0x007BFBA0u   // [INPUT] KEEP — pad/keyboard aggregation (produces skip flag)
+#define CC_S3_DEV_SNAPSHOT    0x007BECD4u   // [DEV]   KEEP — shared input-device snapshot (input-inert)
+#define CC_S3_PAD_AGG         0x007BFBA0u   // [INPUT] DROPPED 2026-06-24 — pumps shared input obj 0x00A9CAA0 -> the leak
 #define CC_S3_AUDIO_LISTENER  0x00814168u   // [AUDIO] KEEP — 3D-audio listener position
-#define CC_S3_SKIP_READ       0x007BFEDCu   // [INPUT] KEEP — skip/START read (al!=0 -> skip)
-#define CC_S3_SKIP_APPLY      0x007A6174u   // KEEP — engine-driven skip ([0xAAB388]=0,[0xAAB394]=3)
+#define CC_S3_SKIP_READ       0x007BFEDCu   // [INPUT] DROPPED 2026-06-24 — redundant w/ the mod's GetAsyncKeyState skip
+#define CC_S3_SKIP_APPLY      0x007A6174u   // [INPUT] DROPPED 2026-06-24 — engine skip apply, no longer driven
 #define CC_S3_EPILOGUE        0x0080030Cu   // [EPILOGUE] KEEP — shared frame epilogue (scene pump)
 #define CC_REQUEST_SETTER_CALL 0x007A60DCu  // engine request(target) — the SM tail uses it
 
@@ -958,20 +1006,59 @@ typedef void (__cdecl *cc_request_fn_t)(int target);
 static void cc_scene3_owned_frame(void)
 {
     cc_void_fn_t    dev_snapshot  = (cc_void_fn_t)(uintptr_t)CC_S3_DEV_SNAPSHOT;
-    cc_void_fn_t    pad_agg       = (cc_void_fn_t)(uintptr_t)CC_S3_PAD_AGG;
     cc_void_fn_t    audio_listen  = (cc_void_fn_t)(uintptr_t)CC_S3_AUDIO_LISTENER;
-    cc_int_fn_t     skip_read     = (cc_int_fn_t)(uintptr_t)CC_S3_SKIP_READ;
-    cc_void_fn_t    skip_apply    = (cc_void_fn_t)(uintptr_t)CC_S3_SKIP_APPLY;
     cc_void_fn_t    epilogue      = (cc_void_fn_t)(uintptr_t)CC_S3_EPILOGUE;
     cc_request_fn_t request       = (cc_request_fn_t)(uintptr_t)CC_REQUEST_SETTER_CALL;
 
-    dev_snapshot();   // KEEP 0x007BECD4 (shared device snapshot)
-    pad_agg();        // KEEP 0x007BFBA0 (input aggregation -> produces the skip flag)
+    // INPUT-LEAK FIX (2026-06-24, disasm-verified on the io client):
+    //   The prior replica KEPT the input AGGREGATION 0x007BFBA0 (and the engine
+    //   skip read 0x007BFEDC / skip apply 0x007A6174). That was the leak: 0x007BFBA0
+    //   pumps the SHARED front-end input object 0x00A9CAA0 (via 0x0078EEDC) and
+    //   builds the logical-action masks. Those masks (and the advanced 0x00A9CAA0
+    //   queue) are read by OTHER live consumers (cursor/menu/camera) — so while the
+    //   video covered the screen, real pad/keyboard input still drove the engine
+    //   underneath. The action-flag globals 0x00AAE934/938 have NO readers; the
+    //   coupling is purely that 0x007BFBA0 advances the shared input queue.
+    //   => DROP 0x007BFBA0 entirely. With the aggregation gone, no engine input is
+    //      produced this frame, so nothing behind the cover can be actuated.
+    //
+    //   The engine skip path (0x007BFEDC read -> 0x007A6174 apply) is now also
+    //   DROPPED: it is redundant. The mod reads a deliberate skip itself via
+    //   GetAsyncKeyState (vid_skip_pressed, render thread, non-consuming) and on a
+    //   fresh Enter/Esc edge tears the cover down + arms the engine 3->5 exit
+    //   (cc_arm_engine_exit writes 0xAAE980=1 then 0xAAE988=1). That arm routes the
+    //   substate machine below straight through request(5) WITHOUT touching the
+    //   input object — DISASM-VERIFIED that the 3->5 handoff (substate -> request(5)
+    //   -> commit pump 0x007A6268 inside the epilogue) has NO dependency on the
+    //   input aggregation having run. So dropping all three input calls is safe AND
+    //   is what stops the leak. 0x007BFEDC additionally calls into the input object,
+    //   so keeping it would partially re-leak — another reason to drop it.
+    //
+    //   KEPT: 0x007BECD4 (device snapshot) — it sets the skip-key/byte[0xAAE93C]
+    //   flags but does NOT pump the shared 0x00A9CAA0 queue, and nothing consumes
+    //   those flags now (the skip read is gone), so it is input-inert; we keep it
+    //   only so the device-state bookkeeping stays coherent across the cover.
+    //   0x00814168 (3D-audio listener) and 0x0080030C (epilogue/scene pump) are
+    //   mandatory non-visual side effects, kept verbatim.
+    dev_snapshot();   // KEEP 0x007BECD4 (device snapshot; input-inert without the agg/read)
+    // DROP 0x007BFBA0 (input aggregation) — see INPUT-LEAK FIX above.
     // SKIP the 3 DRAW calls 0x0081745C / 0x00817604 / 0x00818F80 (+ the 0x0061CDB0
     // ret stub at 0x7C1592 and the 0x005BA748 intro state machine) -> intro draws nothing.
     audio_listen();   // KEEP 0x00814168 (3D-audio listener position)
 
-    // --- substate state machine (verbatim; ALL paths fall through to the sub0 tail) ---
+    // AUDIO-LEAK FIX (2026-06-24): silence the streamed CUBE_OPENING.adx intro BGM.
+    // It is started in the scene-3 ENTRY ctor 0x007C1714 (NOT hooked) AFTER request(3),
+    // and is NOT gated by SOUNDCTRL — so the one-shot mute at arm time can't catch it.
+    // Stop the BGM pool on EVERY owned frame: idempotent (resets already-stopped
+    // players), engine-thread, only runs while the cover is up. This is the lever
+    // that actually keeps the intro audio off under the video.
+    cc_audio_kill_bgm();   // KILL 0x00815434 (engine BGM pool stop) — the ADX silence
+
+    // --- substate state machine (the 3->5 handoff; input-INDEPENDENT) ---
+    // We arm 0xAAE988=1 + 0xAAE980=1 at video EOF/skip (cc_arm_engine_exit); on the
+    // next owned frame this fires request(5) -> the engine's natural 3->5 exit. The
+    // request setter + the commit pump in the epilogue touch only scene globals, not
+    // the input object — so this works with the input aggregation dropped above.
     if (*CC_EXIT_FLAG_988_R == 1) {               // sub1: ADX-done / WE armed it
         signed char f980 = (signed char)*CC_EXIT_FLAG_980_R;
         if (f980 == 0) {
@@ -979,17 +1066,14 @@ static void cc_scene3_owned_frame(void)
         } else if (f980 == 1) {
             request(5);                           // ==1 -> the engine's own 3->5 EXIT
         }
-        // else: fall straight to the sub0 tail (stock `jmp 0x7C15D0`).
+        // else: fall straight to the epilogue (stock `jmp 0x7C15D0`).
     }
 
-    // sub0 tail (reached by default AND by fall-through from sub1):
-    //   KEEP the skip read; on a real skip, KEEP the engine-driven skip apply.
-    //   (The ret-0 timer 0x006DC358 + its dead request(0) are provably never taken
-    //    and are omitted.)
-    if (skip_read())  // KEEP 0x007BFEDC -> al!=0 means a deliberate skip/START
-        skip_apply(); // KEEP 0x007A6174 (engine-driven skip; sets the scene-request)
-
-    epilogue();       // KEEP 0x0080030C (shared frame epilogue) — MANDATORY
+    // sub0 tail: the engine skip read 0x007BFEDC + skip apply 0x007A6174 are DROPPED
+    // (input-leak fix above). The skip is driven by the mod's own GetAsyncKeyState
+    // edge + EOF arm; the ret-0 timer 0x006DC358 + its dead request(0) were never
+    // taken and remain omitted.
+    epilogue();       // KEEP 0x0080030C (shared frame epilogue / scene pump) — MANDATORY
 }
 
 // naked stub: pass through to the stock update when cc_session==0 (byte-identical);
