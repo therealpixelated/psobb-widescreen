@@ -363,6 +363,16 @@ static struct {
     float minimap_nudge_y;     // default -28.0 (whole minimap up). INI: MinimapNudgeY.
     float minimap_vp_dx;       // default -16.0 (map graphic left).  INI: MinimapVpDX.
     float minimap_vp_dy;       // default -12.0 (map graphic up).    INI: MinimapVpDY.
+    // CUSTOM C3 (owner 2026-06-24 corner-track) — how AGGRESSIVELY the minimap heads
+    // toward the top-right corner as HudScale grows (design space expands). 0.0 = no
+    // extra tracking (the on-screen pos still creeps toward the corner because the
+    // shrinking margin = native_gap*(render/design), but the design-space gap is held
+    // native-constant). 1.0 = the native-px corner gap shrinks linearly to 0 as design
+    // -> infinity. Identity at HudScale 1.0 for ANY value (the (1 - native/design) term
+    // is 0 there). Defaults 0.60 = a clear, bounded up+right drift that never overshoots
+    // the corner. INI: MinimapCornerKX / MinimapCornerKY.
+    float minimap_corner_kx;   // default 0.60. X right-edge corner-track strength.
+    float minimap_corner_ky;   // default 0.60. Y top-edge corner-track strength.
     // REFACTOR: patch_phase3 (0x0082B440 splash inline hook),
     // patch_title_art (0x82BB74 push-imm sites) and patch_title_real /
     // title_real_mode (the 8 imm32 0x006f4cf2..0x006f4d66 rewrites) are
@@ -613,6 +623,8 @@ static void load_config(void)
     g_cfg.minimap_nudge_y     = -28.0f;   // C3 (owner): whole minimap UP toward the top corner.
     g_cfg.minimap_vp_dx       = -16.0f;   // C3 (owner): map graphic LEFT (inside the gray box).
     g_cfg.minimap_vp_dy       = -12.0f;   // C3 (owner): map graphic UP (inside the gray box).
+    g_cfg.minimap_corner_kx   =  0.60f;   // C3 (owner): X corner-track strength (right as hs grows).
+    g_cfg.minimap_corner_ky   =  0.60f;   // C3 (owner): Y corner-track strength (up as hs grows).
     g_cfg.patch_flare_scale   = 0;     // 2026-05-26: opt-in (default OFF) until
                                        // in-game effect-type-0 safety is checked.
     g_cfg.flare_scale         = 6.0f;  // 1.5× of the stock 4.0 descriptor scale.
@@ -777,6 +789,8 @@ static void load_config(void)
         else if (_stricmp(key, "MinimapNudgeY")     == 0) g_cfg.minimap_nudge_y = (float)atof(val);
         else if (_stricmp(key, "MinimapVpDX")       == 0) g_cfg.minimap_vp_dx   = (float)atof(val);
         else if (_stricmp(key, "MinimapVpDY")       == 0) g_cfg.minimap_vp_dy   = (float)atof(val);
+        else if (_stricmp(key, "MinimapCornerKX")   == 0) g_cfg.minimap_corner_kx = (float)atof(val);
+        else if (_stricmp(key, "MinimapCornerKY")   == 0) g_cfg.minimap_corner_ky = (float)atof(val);
         else if (_stricmp(key, "PatchFlareScale")   == 0) g_cfg.patch_flare_scale = atoi(val);
         else if (_stricmp(key, "FlareScale")        == 0) {
             float s = (float)atof(val);
@@ -3986,36 +4000,93 @@ static void sp_write_f32(uint32_t va, float v)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-/* C3 minimap corner-nudge helper. Adds an EQUAL delta to a Loop4 X-anchor whose
-   synced Ephinea position the kBakes deanchor.full row set right before us. Folds
-   so re-running apply_special never compounds: the un-nudged base is snapshotted
-   per-VA on first sight, and we always write base+delta (value-guarded). The base
-   is stable per resolution (deanchor = stock + (A-640), A constant), so the snapshot
-   stays valid across every front-end<->in-game re-bake. */
-/* Minimap corner pin (C3). The kBakes deanchor row sets each coord to a FIXED design offset
-   from the edge (design - K). As design_w/h grow with HudScale the on-screen margin
-   (K * render/design) SHRINKS, so the box drifts toward — and off — the corner (the
-   "too far right / not far up / off the edge" reports; the *hud_scale nudge only amplified it).
-   This re-projects each coord so its SCREEN position is HudScale-INVARIANT — it equals the
-   calibrated hs1.0 corner ((native - K) + nudge) scaled onto the live design dim:
-       K     = design - base              (the fixed deanchor offset, constant across HudScale)
-       hs1.0 = native - K + nudge         (the corner coord at HudScale 1.0)
-       final = design * (hs1.0 / native)  (re-projected -> screen pos == hs1.0 at every scale)
-   `design` = live design_w/h, `native` = the hs1.0 design dim (design / hud_scale), `nudge` =
-   extra design-px toward the corner at hs1.0 (X only; 0 for Y). Snapshots the clean deanchored
-   base once (apply_special runs after the kBakes loop); value-guarded; no-op/identity at hs1.0. */
-static void minimap_corner_pin(uint32_t va, int slot, float design, float native, float nudge)
+/* ============================================================================
+ * CUSTOM C3 — minimap corner pin (owner 2026-06-24 rewrite).
+ *
+ * OWNER SPEC: "The 1.0 placement is fine, just make it properly scale. It should
+ * move up and more to the right (both pieces) when scaling. It doesn't need to
+ * change size." => identity at HudScale 1.0; as HudScale grows BOTH the gray-box
+ * (background) AND the map-graphic (viewport) head toward the TOP-RIGHT corner.
+ * The SIZE fields (0x00A11328 / 0x00A113EC) are never written.
+ *
+ * SNAPSHOT SUBTLETY (accounted for): apply_special() runs AFTER the kBakes loop,
+ * so the value we snapshot has ALREADY been deanchored by these rows:
+ *     X (0x00A11324 / 0x00A113E8) "deanchor.full"  : snap = stockX + (design_w - 640)
+ *     Y (0x00A1133C / 0x00A113F4) "deanchor.bottom" : snap = stockY + (design_h - 480)
+ * Both deanchor terms are design-dependent, so the raw snapshot CANNOT be reused
+ * across HudScale. We back the design-dependent part out to recover the clean
+ * HudScale-1.0 (native) base, which IS HudScale-invariant:
+ *     base_native = snap - (design - native)        [design-native = native*(hs-1)]
+ *       X: base_native = stockX + (native_w - 640)
+ *       Y: base_native = stockY + (native_h - 480) = stockY        (native_h == 480)
+ * We re-peek + re-derive every call (NOT a one-shot snapshot) so the value tracks
+ * the front-end<->in-game flip and any HudScale change; the math is its own anti-
+ * compound guard (it computes an ABSOLUTE target from the deanchored snapshot, so
+ * value-guarded re-runs converge, never accumulate).
+ *
+ * THE BUG IN THE OLD CODE: final = design*(native - design + base + nudge)/native.
+ * That re-projects to a SCREEN-CONSTANT spot (screen_x frozen at every HudScale)
+ * and, for many base/nudge pairs, the (native - design) term drives the coord
+ * NEGATIVE as design grows -> drifts OFF the top-left. It does the opposite of
+ * "move toward the corner as scale grows".
+ *
+ * THE FIX — express each coord as "edge minus a native-px gap that shrinks toward
+ * the corner as design grows":
+ *     base_eff = base_native + nudge          (the calibrated hs1.0 corner coord)
+ *     shrink   = 1 - k*(1 - native/design)    (1 at design==native; decreases as design grows; k>=0)
+ *   X (right edge): gap = native_w - base_eff ;  coord = design_w - gap*shrink   (clamp <= design_w)
+ *   Y (top  edge):  gap = base_eff           ;  coord = gap*shrink               (clamp >= 0)
+ * The engine projects coord*(render/design) to screen, so:
+ *   - X screen right-edge gap = (render_w/design_w)*gap*shrink -> shrinks twice over
+ *     (render/design falls AND shrink falls) => moves RIGHT, never past the edge.
+ *   - Y screen top gap        = (render_h/design_h)*gap*shrink -> shrinks => moves UP,
+ *     clamped at 0 so it can never overshoot off the top.
+ *
+ * IDENTITY AT HudScale 1.0 (algebra): design==native => shrink = 1 - k*0 = 1.
+ *   X: coord = native_w - (native_w - base_eff) = base_eff = base_native + nudge.
+ *   Y: coord = base_eff = base_native + nudge.
+ *   And base_native == snap there (design-native==0), so coord == snap + nudge — the
+ *   exact value the OLD code wrote at hs1.0 (the owner-approved placement). Identity
+ *   holds for ANY k. (Worked numbers, render 1920x1080, defaults kx=ky=0.60,
+ *   nudge_x=48 vp_dx=-16 nudge_y=-28 vp_dy=-12; native_w=853.33 native_h=480:
+ *     bg X screen right-gap : 252.7px(hs1.0) -> 134.8px(hs1.5) -> 88.5px(hs2.0)  [RIGHT]
+ *     vp X screen right-gap : 144.7px        ->  77.2px        -> 50.7px         [RIGHT]
+ *     bg Y screen top-gap   :  81.0px        ->  43.2px        -> 28.3px         [UP]
+ *     vp Y screen top-gap   : 198.0px        -> 105.6px        -> 69.3px         [UP]
+ *   all monotonic toward the corner, all on-screen, identity at hs1.0.)
+ *
+ * `design` = live design_w/h (s->A / s->C), `native` = the hs1.0 design dim
+ * (design / hud_scale), `nudge` = the hs1.0 offset (>0 = right for X; <0 = up for Y),
+ * `k` = corner-track strength (INI MinimapCornerKX/KY), `is_x` selects the edge.
+ * Value-guarded via sp_write_f32; never compounds. */
+static void minimap_corner_pin(uint32_t va, float design, float native,
+                               float nudge, float k, int is_x)
 {
-    static float s_base[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    static int   s_have[4] = { 0, 0, 0, 0 };
-    if (slot < 0 || slot > 3) return;
     if (native < 1.0f || design < 1.0f) return;
-    if (!s_have[slot]) {
-        s_base[slot] = hs_peek_f32(va);       /* clean deanchored base (kBakes just set it) */
-        s_have[slot] = 1;
+    if (!(k >= 0.0f && k <= 4.0f)) k = 0.60f;          /* sane clamp on the INI knob */
+
+    /* the kBakes deanchor just set the live value; back out the design-dependent
+       term to recover the HudScale-1.0 (native) base. (design - native) is the
+       SAME quantity for both the .full(-640) and .bottom(-480) deanchor forms,
+       since both add (design - edge) and we subtract (design - native). */
+    float snap        = hs_peek_f32(va);
+    float base_native = snap - (design - native);
+    float base_eff    = base_native + nudge;           /* calibrated hs1.0 corner coord */
+
+    float shrink = 1.0f - k * (1.0f - native / design); /* 1 @hs1.0; falls as design grows */
+    if (shrink < 0.0f) shrink = 0.0f;                   /* never invert past the edge/top */
+
+    float coord;
+    if (is_x) {
+        float gap = native - base_eff;                  /* native-px gap from the RIGHT edge */
+        coord = design - gap * shrink;                  /* shrink the gap -> move RIGHT */
+        if (coord > design) coord = design;             /* clamp on-screen (right edge) */
+    } else {
+        float gap = base_eff;                           /* native-px gap from the TOP edge */
+        coord = gap * shrink;                           /* shrink the gap -> move UP */
+        if (coord < 0.0f) coord = 0.0f;                 /* clamp on-screen (top edge) */
     }
-    float frac = (native - design + s_base[slot] + nudge) / native;
-    sp_write_f32(va, design * frac);          /* value-guarded; never compounds */
+    sp_write_f32(va, coord);                            /* value-guarded; never compounds */
 }
 
 /* apply_special — the special rows that aren't (coeff*base+offset)*base2. After the
@@ -4046,10 +4117,14 @@ static void apply_special(const ws_scale_ctx *s)
            vp_dx (negative = left) so the map sits further left inside the gray box.
            Y: both layers share nudge_y (negative = whole minimap up); the VIEWPORT gets an
            EXTRA vp_dy (negative = map up) inside the box. (owner 2026-06-24 nudge.) */
-        minimap_corner_pin(0x00A11324u, 0, A, A0, g_cfg.minimap_nudge_x + g_cfg.minimap_vp_dx);  /* viewport   X (+nudge, left) */
-        minimap_corner_pin(0x00A113E8u, 1, A, A0, g_cfg.minimap_nudge_x);                        /* background X (gray box)     */
-        minimap_corner_pin(0x00A1133Cu, 2, C, C0, g_cfg.minimap_nudge_y + g_cfg.minimap_vp_dy);  /* viewport   Y (up)           */
-        minimap_corner_pin(0x00A113F4u, 3, C, C0, g_cfg.minimap_nudge_y);                        /* background Y (gray box up)  */
+        float kx = g_cfg.minimap_corner_kx, ky = g_cfg.minimap_corner_ky;
+        /* X (is_x=1): track the RIGHT edge. Y (is_x=0): track the TOP edge. The VIEWPORT
+           (map graphic) gets an EXTRA vp_dx (left) / vp_dy (up) inside the gray box;
+           both layers share the corner-track strengths so fg+bg stay locked together. */
+        minimap_corner_pin(0x00A11324u, A, A0, g_cfg.minimap_nudge_x + g_cfg.minimap_vp_dx, kx, 1); /* viewport   X (right; +left dx) */
+        minimap_corner_pin(0x00A113E8u, A, A0, g_cfg.minimap_nudge_x,                       kx, 1); /* background X (gray box; right)  */
+        minimap_corner_pin(0x00A1133Cu, C, C0, g_cfg.minimap_nudge_y + g_cfg.minimap_vp_dy, ky, 0); /* viewport   Y (up; +up dy)       */
+        minimap_corner_pin(0x00A113F4u, C, C0, g_cfg.minimap_nudge_y,                       ky, 0); /* background Y (gray box; up)     */
     }
 }
 
