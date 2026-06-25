@@ -2403,6 +2403,170 @@ static int lw_yanchor_redirect(void)
     return redirect_call(site, 0x00737F80u, (void *)&lw_yanchor_shim);
 }
 
+// ============================================================
+// FIX B — QUEST/AREA-TRANSITION "NOW LOADING" RING + RUNE-HEIGHT (Shape A).
+// ============================================================
+// The green seal-ring + 3 spinning rune orbs on the quest/area-transition loading
+// screen are drawn by RenderGameListBackgroundAndChatBubbles_006f475c (vtable
+// 0x00B3E9B0 slot +8 = 0x00B3E9B8; this=ecx; gated internally by g_IsRenderingActive
+// [0x00A16380]). Its 2D quads go through composer 0x0082BB74 which applies the GLOBAL
+// 2D affine asymmetrically: screenX = desc[0]*SCALE_X[0xACC0E8] + OFFSET_X[0xACC0F0],
+// screenY = desc[4]*SCALE_Y[0xACC0EC] + OFFSET_Y[0xACC0F4]. During the transition there
+// is NO live player, so worker_scale_poke's symmetric in-game affine pin never fires and
+// the loading scene's own setter governs with SCALE_X != SCALE_Y -> the ring squashes
+// (bug a: "should be original 1.0") and the orbs come out right-width-wrong-height (bug b).
+//
+// SHAPE A: wrap 0x006F475C and, FOR THE LOADING SUB-STATE ONLY, force a SQUARE + centered
+// affine for the duration of its render, then restore. One wrap fixes BOTH bugs without
+// touching the global affine for any other pass (lobby/in-game stay wide).
+//
+// SCOPING (critical): 0x006F475C is RenderGameListBackgroundAndChatBubbles — it ALSO draws
+// the LOBBY game-list background. The override is gated on the loading sub-state
+// (g_is_quest_loading [0x00AAB378] != 0). When NOT loading (lobby game-list browsing) the
+// shim is a transparent pass-through -> the shared lobby path is byte-identical to stock.
+//
+// MECHANISM: there is NO `E8 call 0x006F475C` site in the image (the render is dispatched
+// virtually via `call [vtable+8]`), so the ks_hexfit/lw_yanchor E8 redirect_call does not
+// apply. Instead we redirect the .data VTABLE SLOT 0x00B3E9B8 (stock = 0x006F475C) to our
+// shim. A .data pointer write is idempotent + value-guarded + sig-guarded, and (being .data,
+// like the immediate affine bakes) SURVIVES the FE->IG/loading transition that wipes .text
+// code-flow detours. We still re-assert it (stock-guarded, steady-state quiet) every
+// transition tick for safety, exactly like lw_yanchor.
+//
+// SQUARE BASIS (TUNABLE / UNVERIFIED-LIVE): we set SCALE_X = SCALE_Y = min(live SCALE_X,
+// live SCALE_Y) so the ring keeps its original aspect (un-stretched, full size) and the orbs
+// get equal X/Y scale (right height). We re-center horizontally so the design-space ring
+// center (320,220) maps to (render_w/2, unchanged): OFFSET_X' = render_w/2 - 320*s. The main
+// agent must confirm live: read [0xACC0E8] vs [0xACC0EC] during the loading screen at 16:9 to
+// confirm the asymmetry + that min() (height-fit) is the right basis (vs max / a fixed ratio);
+// FIXB_RING_CENTER_DESIGN_X is the design-space ring center X (320 per the static 0x006F4915
+// init _DAT_00a96918=320.0). At true 4:3 the affine is already square (SCALE_X==SCALE_Y) and
+// centered, so save==restore writes the same bits (value-guarded) -> byte-identical no-op.
+#define FIXB_RING_VTABLE_SLOT_VA   0x00B3E9B8u   // vtable 0x00B3E9B0 slot +8
+#define FIXB_RING_RENDER_VA        0x006F475Cu   // RenderGameListBackgroundAndChatBubbles
+#define FIXB_QUEST_LOAD_VA         0x00AAB378u   // g_is_quest_loading (!=0 in the loading sub-state)
+#define FIXB_AFFINE_SX_VA          0x00ACC0E8u   // SCALE_X
+#define FIXB_AFFINE_SY_VA          0x00ACC0ECu   // SCALE_Y
+#define FIXB_AFFINE_OX_VA          0x00ACC0F0u   // OFFSET_X
+#define FIXB_AFFINE_OY_VA          0x00ACC0F4u   // OFFSET_Y
+#define FIXB_RING_CENTER_X_VA      0x00A96918u   // _DAT_00a96918 = live ring center X (design space)
+// NB the existing anzz1 row 0x006F4922 rewrites the center-X INIT immediate from 320.0 to
+// design_w*0.5 (and 0x006F4936: 220.0 -> design_h*0.5), so at runtime the ring center X is
+// design_w/2 (640 @hs1.0 native... =320 @4:3 / 640 @1280-canvas), NOT a fixed 320. We READ
+// the live center from this VA rather than hardcoding, so FIX B composes with that rewrite.
+
+// hs_poke_f32 (value-guarded .data float store) is defined far below; forward-declare it
+// here (first use in the file) so the affine writes below aren't implicit-int. Mirrors the
+// hs_peek_f32 forward decl before ks_hexfit_transform.
+static void hs_poke_f32(uint32_t va, float v);
+
+// non-recursive render-thread-only save slots (the loading ring does not re-enter itself)
+static volatile uint32_t g_ldring_this    = 0;   // saved this (ecx) across the C-helper calls
+static volatile uint32_t g_ldring_active  = 0;   // 1 = we overrode the affine this render (restore in post)
+static volatile uint32_t g_ldring_sx      = 0;   // saved SCALE_X bits
+static volatile uint32_t g_ldring_sy      = 0;   // saved SCALE_Y bits
+static volatile uint32_t g_ldring_ox      = 0;   // saved OFFSET_X bits
+static volatile uint32_t g_ldring_oy      = 0;   // saved OFFSET_Y bits
+
+// ld_ring_pre — runs BEFORE the real render. Returns 1 (and overrides the affine) iff
+// the loading sub-state is active; 0 otherwise (lobby game-list path => no override).
+// SEH-guarded; on any fault returns 0 (transparent pass-through).
+static int __cdecl ld_ring_pre(void)
+{
+    __try {
+        if (!g_cfg.enabled) return 0;
+        if (*(volatile uint32_t *)(uintptr_t)FIXB_QUEST_LOAD_VA == 0u) return 0;  // not loading => pass through (lobby)
+
+        float sx = *(volatile float *)(uintptr_t)FIXB_AFFINE_SX_VA;
+        float sy = *(volatile float *)(uintptr_t)FIXB_AFFINE_SY_VA;
+        if (!(sx > 0.0001f) || !(sy > 0.0001f)) return 0;                         // unset affine => bail
+
+        float s = (sx < sy) ? sx : sy;                                            // square = height-fit (min)
+        /* re-center horizontally: the live design-space ring center X must keep landing at
+           render_w/2 under the square scale (so shrinking SCALE_X to the square value does not
+           drift the ring off-center). center_x = _DAT_00a96918 (design_w/2 after the anzz1
+           center-rewrite, or 320 stock). render_w = the live backbuffer extent. */
+        float center_x = *(volatile float *)(uintptr_t)FIXB_RING_CENTER_X_VA;
+        if (!(center_x > 0.0f)) center_x = 320.0f;                                // stock fallback
+        float rw = (float)g_scale.render_w;
+        if (!(rw > 1.0f)) rw = sx * 853.333f;                                     // fallback: SCALE_X*design_w_native
+        float new_ox = rw * 0.5f - center_x * s;
+
+        /* save the live affine, then write the square + centered override (value-guarded). */
+        g_ldring_sx = *(volatile uint32_t *)(uintptr_t)FIXB_AFFINE_SX_VA;
+        g_ldring_sy = *(volatile uint32_t *)(uintptr_t)FIXB_AFFINE_SY_VA;
+        g_ldring_ox = *(volatile uint32_t *)(uintptr_t)FIXB_AFFINE_OX_VA;
+        /* OFFSET_Y is left UNCHANGED (Shape-A re-centers X only; the loading screen is full-
+           height so Y follows the height-fit scale). UNVERIFIED-LIVE: if s != live SCALE_Y the
+           vertical center can drift; if the main agent sees the ring sit too high/low, mirror
+           the X recenter on Y here: new_oy = render_h/2 - center_y(_DAT_00a9691c)*s. Saved for
+           restore symmetry. */
+        g_ldring_oy = *(volatile uint32_t *)(uintptr_t)FIXB_AFFINE_OY_VA;
+        hs_poke_f32(FIXB_AFFINE_SX_VA, s);
+        hs_poke_f32(FIXB_AFFINE_SY_VA, s);
+        hs_poke_f32(FIXB_AFFINE_OX_VA, new_ox);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+// ld_ring_post — runs AFTER the real render. Restores the saved affine iff ld_ring_pre
+// overrode it (g_ldring_active). Value-guarded writes (idempotent).
+static void __cdecl ld_ring_post(int overrode)
+{
+    if (!overrode) return;
+    __try {
+        hs_poke_f32(FIXB_AFFINE_SX_VA, *(volatile float *)&g_ldring_sx);
+        hs_poke_f32(FIXB_AFFINE_SY_VA, *(volatile float *)&g_ldring_sy);
+        hs_poke_f32(FIXB_AFFINE_OX_VA, *(volatile float *)&g_ldring_ox);
+        hs_poke_f32(FIXB_AFFINE_OY_VA, *(volatile float *)&g_ldring_oy);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+
+// ld_ring_shim — __thiscall wrapper invoked via the redirected vtable slot (ecx=this,
+// [esp]=dispatcher return). The real render takes only `this` (no stack args), so this is a
+// clean prologue/epilogue: stash this, run pre (may override affine), reload this, CALL the
+// real render, run post (restore), return to the dispatcher.
+__declspec(naked) static void ld_ring_shim(void)
+{
+    __asm {
+        mov  dword ptr ds:[g_ldring_this], ecx          // save this
+        call ld_ring_pre                                // cdecl -> eax = overrode?
+        mov  dword ptr ds:[g_ldring_active], eax
+        mov  ecx, dword ptr ds:[g_ldring_this]          // restore this for the thiscall
+        mov  eax, FIXB_RING_RENDER_VA
+        call eax                                        // real RenderGameListBackgroundAndChatBubbles (ecx=this)
+        mov  eax, dword ptr ds:[g_ldring_active]
+        push eax                                        // arg: overrode
+        call ld_ring_post                               // cdecl
+        add  esp, 4
+        ret                                             // back to the vtable dispatcher
+    }
+}
+
+// ld_ring_redirect — install/re-install the loading-ring affine wrap by redirecting the
+// .data vtable slot 0x00B3E9B8 from 0x006F475C to our shim. Idempotent + steady-state quiet:
+// only writes when the slot is STOCK (== 0x006F475C); a slot already pointing at our shim, or
+// at a foreign value, is left untouched. Returns 1 iff we (re)installed this call. The slot is
+// .data (no icache flush needed); we VirtualProtect it for the write. Mirrors the
+// lw_yanchor_redirect stock-guard so re-assertion from the transition tick is silent.
+static int ld_ring_redirect(void)
+{
+    volatile uint32_t *slot = (volatile uint32_t *)(uintptr_t)FIXB_RING_VTABLE_SLOT_VA;
+    __try {
+        uint32_t cur = *slot;
+        if (cur == (uint32_t)(uintptr_t)&ld_ring_shim) return 0;   // already ours -> skip quietly
+        if (cur != FIXB_RING_RENDER_VA) return 0;                  // foreign / not stock -> leave
+        DWORD old, tmp;
+        if (!VirtualProtect((LPVOID)(uintptr_t)FIXB_RING_VTABLE_SLOT_VA, 4, PAGE_EXECUTE_READWRITE, &old))
+            return 0;
+        *slot = (uint32_t)(uintptr_t)&ld_ring_shim;
+        VirtualProtect((LPVOID)(uintptr_t)FIXB_RING_VTABLE_SLOT_VA, 4, old, &tmp);
+        log_line("[pso_widescreen] loading-ring affine wrap: vtable slot 0x%08x 0x%08x -> %p",
+                 FIXB_RING_VTABLE_SLOT_VA, FIXB_RING_RENDER_VA, (void *)&ld_ring_shim);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
 // ====================================================================
 // char-select 1.0-PIN REVERTED — the native-frame constants
 // HS_FE_DESIGN_W/H_NATIVE were only used to bake the .data anchors below in a
@@ -3070,6 +3234,17 @@ static void patch_ad_draw_line(const ws_scale_ctx *s)
  *  apply_special() is defined just below apply_bakes() but called by it. */
 static void apply_special(const ws_scale_ctx *s);   /* fwd: apply_bakes calls it */
 
+/* FIX A — cutscene/dialogue letterbox origin-overscan magnitude (design-space px).
+   The 4 un-baked corner cells (TOP.X/TOP.Y/BOT.X + TOP.H) are pushed this many px
+   PAST the top/left canvas edge so the in-game affine's positive/half-pixel-rounded
+   OFFSET_X/Y can't leave an uncovered strip where the 3D scene leaks through. The
+   bar interiors are pure black, so over-extending off-canvas is harmless.
+   TUNABLE: UNVERIFIED-LIVE — the main agent must read [0xACC0F0]/[0xACC0F4] (OFFSET_X/Y)
+   during an in-game cutscene at 16:9 and size this to >= max(OFFSET_X,OFFSET_Y); 32 is a
+   safe guess. If the leak persists, bump it; if a bottom/right strip ever appears, this
+   is NOT the cause (those edges over-cover via the existing hud.w / BOT.Y-deanchor rows). */
+#define FIXA_LETTERBOX_OVERSCAN_PX  32.0f
+
 static const bake_t kBakes[] = {
 /* ===== kBakes[] — 780 authoritative rows (anzz1 folded + patch_* extracted) =====
    (ANZZ1 565 + EPHINEA 148 + TRINITY 56 + OURS 11; the per-source subheaders below
@@ -3282,6 +3457,24 @@ static const bake_t kBakes[] = {
   { 0x008F9EF8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x008F9F2C, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x008F9F34, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
+  /* ---- FIX A — cutscene/dialogue letterbox origin overscan (kills the top/left 3D sliver) ----
+     QuestLoadingScreenBlackBarObject_Render 0x0040C1E8 (mode [this+0x1c]==1) reads the two-bar
+     design rect from the SoA at 0x008F9F2C. The 4 ORIGIN cells (TOP.X/TOP.Y/BOT.X + TOP.H) were
+     un-baked, so the affine maps the top-left bar corner to (OFFSET_X,OFFSET_Y) and any positive /
+     fistp-rounded offset leaves an uncovered top/left strip. Push the origins -OVERSCAN px and grow
+     TOP.H by OVERSCAN so the bar's INNER edge (design y=64) is unchanged — the visible band
+     thickness is identical, only the off-canvas overhang grows. GATE_ALWAYS; pure-black interior
+     makes the off-canvas overhang harmless. The W rows above already widen to design_w (>704),
+     so the left -OVERSCAN does NOT uncover the right (it still over-covers). BOT.Y origin is the
+     separate eph.92va.l5.hadd.raw deanchor row (0x008F9F48, different VA — no conflict).
+     stock=0x00000000 on the 3 origin cells == their literal 0.0f stock => sig-guard unchecked,
+     idempotent-guarded (live==want skip). TOP.H stock=0x42800000 (64.0) IS sig-guarded.
+     NOTE (4:3): at 640x480 the affine is identity so -OVERSCAN maps to screen <0 (off-screen) and
+     the visible band 0..64 is identical to stock, even though the design cell value differs. */
+  { 0x008F9F3C, K_SET, B_LIT, 0.0f, -FIXA_LETTERBOX_OVERSCAN_PX,        SRC_OURS, GATE_ALWAYS, 0x00000000, "letterbox.TOP.X overscan", B_LIT },
+  { 0x008F9F40, K_SET, B_LIT, 0.0f, -FIXA_LETTERBOX_OVERSCAN_PX,        SRC_OURS, GATE_ALWAYS, 0x00000000, "letterbox.TOP.Y overscan", B_LIT },
+  { 0x008F9F44, K_SET, B_LIT, 0.0f, -FIXA_LETTERBOX_OVERSCAN_PX,        SRC_OURS, GATE_ALWAYS, 0x00000000, "letterbox.BOT.X overscan", B_LIT },
+  { 0x008F9F30, K_SET, B_LIT, 0.0f,  64.0f + FIXA_LETTERBOX_OVERSCAN_PX, SRC_OURS, GATE_ALWAYS, 0x42800000, "letterbox.TOP.H 64->64+overscan (origin moved up)", B_LIT },
   { 0x008F9F58, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x008FA8A8, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x008FAE50, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
@@ -4320,6 +4513,19 @@ static void apply_static_patches(const ws_scale_ctx *s)
         log_line("[pso_widescreen] listwindow y-anchor: SKIP (disabled)");
     }
 
+    // (4c) FIX B — quest/area-transition loading-RING affine wrap. Redirects the
+    // .data vtable slot 0x00B3E9B8 (0x006F475C) to ld_ring_shim, which forces a
+    // SQUARE + centered affine for the loading sub-state only (g_is_quest_loading
+    // [0x00AAB378]!=0); the shared LOBBY game-list path passes through untouched.
+    // The slot is .data so it survives the FE->IG transition, but we re-assert it
+    // (stock-guarded, steady-state quiet) every transition tick for safety.
+    if (s->enabled) {
+        if (ld_ring_redirect())
+            log_line("[pso_widescreen] loading-ring affine wrap: installed (vtable slot 0x00B3E9B8)");
+    } else {
+        log_line("[pso_widescreen] loading-ring affine wrap: SKIP (disabled)");
+    }
+
     // (5) NO-VIGNETTE — NOP the 3 F12 / in-game-MENU vignette-draw sites (the dark
     // dimming scrim drawn behind the in-game menu) for a clean view. This is the
     // MENU vignette, NOT the status-effect vignette (mod_vignette.asi is separate).
@@ -4494,6 +4700,15 @@ static void ingame_reassert_on_transition(void)
             s_pending = 0;
         }
         s_prev_ig = ig;
+
+        /* FIX B re-assert: the loading-ring affine wrap (vtable slot 0x00B3E9B8) must be
+           present DURING the loading sub-state, which is exactly the FE->IG/area transition
+           window (reassert_ingame_hooks only fires on the !loading post-transition edge, too
+           late for the ring). The slot is .data and survives the transition, but a wrapper /
+           another ASI could revert it; ld_ring_redirect is stock-guarded + steady-state quiet,
+           so this is a cheap no-op once installed. Run it every frame, unconditional of the
+           transition state machine above. */
+        if (g_scale.enabled) ld_ring_redirect();
 
         /* clobber re-assert: a d3d8 wrapper or another ASI may re-init .data and
            revert our design_w (0x0098A4B8) to stock 640.0. One read/frame; re-run
