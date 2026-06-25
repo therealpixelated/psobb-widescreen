@@ -1435,8 +1435,9 @@ static int vid_mf_open_inner(int bb_w, int bb_h)
         return 0;
     }
 
-    // ENABLE_VIDEO_PROCESSING lets the reader insert the Video Processor MFT so
-    // it can both convert to RGB32 and scale to the requested backbuffer size.
+    // ENABLE_VIDEO_PROCESSING lets the reader insert a converter MFT so it can
+    // satisfy the RGB32 request (we do NOT request a size, so it only converts
+    // format; the frame stays at the video's native resolution).
     IMFAttributes *attrs = NULL;
     if (FAILED(MFCreateAttributes(&attrs, 1)) || !attrs) {
         log_line("[video] mf: MFCreateAttributes failed");
@@ -1455,9 +1456,12 @@ static int vid_mf_open_inner(int bb_w, int bb_h)
     IMFSourceReader_SetStreamSelection(rdr, (DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
     IMFSourceReader_SetStreamSelection(rdr, (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
 
-    // Demand RGB32 (== D3DFMT_A8R8G8B8 byte order == our BGRA ring) at the
-    // backbuffer size, so the Video Processor scales for us and frame == bb
-    // (CopyRects stays 1:1). FRAME_SIZE is the packed UINT64 pair.
+    // Demand RGB32 (== D3DFMT_A8R8G8B8 byte order == our BGRA ring) but DO NOT
+    // force a FRAME_SIZE: let the reader negotiate the video's NATIVE decode size
+    // (the auto-inserted Color Converter DSP converts format but does NOT resize,
+    // so forcing bb dims => MF_E_INVALIDMEDIATYPE). We read the negotiated dims
+    // back below and the GPU stretches the native texture to fill the backbuffer
+    // at present time (fullscreen textured quad).
     IMFMediaType *mt = NULL;
     if (FAILED(MFCreateMediaType(&mt)) || !mt) {
         log_line("[video] mf: MFCreateMediaType failed");
@@ -1465,14 +1469,12 @@ static int vid_mf_open_inner(int bb_w, int bb_h)
     }
     IMFMediaType_SetGUID(mt, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     IMFMediaType_SetGUID(mt, &MF_MT_SUBTYPE,    &MFVideoFormat_RGB32);
-    mt_set_pair(mt, &MF_MT_FRAME_SIZE, (UINT32)bb_w, (UINT32)bb_h);
     hr = IMFSourceReader_SetCurrentMediaType(
             rdr, (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, mt);
     IMFMediaType_Release(mt);
     if (FAILED(hr)) {
-        // Windows N / KN without the Media Feature Pack has no H.264 MFT here.
-        log_line("[video] mf: SetCurrentMediaType(RGB32 %dx%d) failed hr=0x%08x "
-                 "(Windows N / no h264 MFT?)", bb_w, bb_h, hr);
+        log_line("[video] mf: SetCurrentMediaType(RGB32) failed hr=0x%08x "
+                 "-> fallback", hr);
         return 0;
     }
 
@@ -1500,9 +1502,9 @@ static int vid_mf_open_inner(int bb_w, int bb_h)
     g_video.fps = fps;
     IMFMediaType_Release(cur);
 
-    // Decode-to-backbuffer: honor the negotiated dims (the Video Processor
-    // should have scaled to bb; if a driver refused, vid_compute_rect aspect-
-    // fits and the ring is sized to the negotiated dims either way).
+    // Decode-at-native: honor the negotiated dims (the video's true frame size).
+    // The ring + D3D texture are sized to these negW/negH and the present-time
+    // fullscreen quad (vid_compute_rect) aspect-fits/stretches them to the bb.
     g_video.frame_w = (int)negW;
     g_video.frame_h = (int)negH;
 
