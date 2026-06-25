@@ -346,7 +346,7 @@ static struct {
     // design-space coords (NOT deltas) and the zoom is the .text imm32 at
     // 0x00804A5D (smaller = wider field of view).
     int   patch_minimap;       // 1 = bake minimap position + zoom. Default 1.
-    int   no_vignette;         // 1 = NOP the 3 engine vignette-draw sites for a clean edge-free view. Default 1.
+    int   no_vignette;         // 1 = NOP the 3 F12/in-game-MENU vignette sites (the dark menu-dim scrim). NOT mod_vignette (status FX). Default 1.
     float minimap_bg_x;        // bg origin X (design space).
     float minimap_bg_y;        // bg origin Y.
     float minimap_vp_x;        // viewport origin X (design space).
@@ -624,7 +624,7 @@ static void load_config(void)
     // minimap_zoom-asi). bg+vp move together; zoom 0.53 (~47% of stock
     // 1.1338) widens the FOV substantially without making icons too small.
     g_cfg.patch_minimap       = 1;
-    g_cfg.no_vignette         = 1;     // NOP the 3 engine vignette-draw sites (clean edge-free view).
+    g_cfg.no_vignette         = 1;     // F12/in-game-MENU vignette OFF (clean view). NOT mod_vignette (status FX).
     g_cfg.minimap_bg_x        = 708.33f;
     g_cfg.minimap_bg_y        =  19.0f;
     g_cfg.minimap_vp_x        = 772.33f;
@@ -4320,8 +4320,10 @@ static void apply_static_patches(const ws_scale_ctx *s)
         log_line("[pso_widescreen] listwindow y-anchor: SKIP (disabled)");
     }
 
-    // (5) NO-VIGNETTE — NOP the 3 engine in-game vignette-draw sites for a clean,
-    // edge-free view. Absolute VAs (no-ASLR base 0x00400000), patched via the
+    // (5) NO-VIGNETTE — NOP the 3 F12 / in-game-MENU vignette-draw sites (the dark
+    // dimming scrim drawn behind the in-game menu) for a clean view. This is the
+    // MENU vignette, NOT the status-effect vignette (mod_vignette.asi is separate).
+    // Absolute VAs (no-ASLR base 0x00400000), patched via the
     // shared patch_write() helper (VirtualProtect EXECUTE_READWRITE -> memcpy ->
     // restore -> FlushInstructionCache). Stock-byte guarded BEFORE each write so
     // re-running is a no-op AND a non-matching build is left untouched.
