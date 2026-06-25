@@ -2084,10 +2084,25 @@ static int vid_start(IDirect3DDevice8 *dev, int bb_w, int bb_h)
     int opened = (g_video.decoder == VID_DECODER_FFMPEG)
                      ? vid_spawn_ffmpeg(bb_w, bb_h)
                      : vid_mf_open(bb_w, bb_h);
+
+    // MF auto-fallback: if the in-process MF open failed (Windows N / no h264
+    // MFT — hr=0xc00d36b4), retry via external ffmpeg.exe BEFORE giving up to
+    // the stock intro. On success we flip g_video.decoder to FFMPEG so the
+    // audio-start gate (below) and teardown branch both take the ffmpeg path.
+    // (This also covers the VID_NO_MF build, where vid_mf_open is a stub that
+    // returns 0.)
+    if (!opened && g_video.decoder == VID_DECODER_MF) {
+        log_line("[video] MF open failed -> auto-fallback to ffmpeg");
+        if (!g_video.ffmpeg[0] || !vid_file_exists(g_video.ffmpeg)) {
+            _snprintf_s(g_video.ffmpeg, sizeof(g_video.ffmpeg), _TRUNCATE, "ffmpeg");
+        }
+        opened = vid_spawn_ffmpeg(bb_w, bb_h);
+        if (opened) g_video.decoder = VID_DECODER_FFMPEG;
+    }
+
     if (!opened) {
         InterlockedExchange(&g_video.playing, 0);
-        vid_disable_perm(g_video.decoder == VID_DECODER_FFMPEG
-                             ? "ffmpeg spawn failed" : "mf open failed");
+        vid_disable_perm("decode open failed (mf+ffmpeg)");
         return 0;
     }
 
