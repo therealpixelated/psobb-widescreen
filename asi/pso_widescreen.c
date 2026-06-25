@@ -3742,6 +3742,16 @@ static const bake_t kBakes[] = {
   { 0x00972620, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
   { 0x00972698, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
   { 0x00972700, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
+  /* HANGAME title-menu (Login/Start Game/Exit Game) position struct {X@+0,Y@+4}.
+     Re-added 2026-06-25: the recode (31ac9f8 deleted patch_hangame_title_menu_layout;
+     e106314 pruned the apply_special block on a FALSE "Ephinea cascade covers it" — the
+     Ephinea byte-delta has NO row at 0x00974E08/0C because Ephinea never uses the Korean
+     Hangame login path). Left stock 4:3 (210/340) the menu sat left-of-center behind the
+     logo. center-anchor X / bottom-anchor Y, identical transform to the live-verified
+     E3C/E40 siblings below. Single private xref (push @0x00761C63) so GATE_ALWAYS is a
+     dead write on non-hangame boots; 4:3-safe (deltas are 0 at design 640x480). */
+  { 0x00974E08, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hangame.menu.x", B_LIT },
+  { 0x00974E0C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hangame.menu.y", B_LIT },
   { 0x00974E3C, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
   { 0x00974E40, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
   { 0x00974E44, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
