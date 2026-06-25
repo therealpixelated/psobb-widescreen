@@ -346,6 +346,7 @@ static struct {
     // design-space coords (NOT deltas) and the zoom is the .text imm32 at
     // 0x00804A5D (smaller = wider field of view).
     int   patch_minimap;       // 1 = bake minimap position + zoom. Default 1.
+    int   no_vignette;         // 1 = NOP the 3 engine vignette-draw sites for a clean edge-free view. Default 1.
     float minimap_bg_x;        // bg origin X (design space).
     float minimap_bg_y;        // bg origin Y.
     float minimap_vp_x;        // viewport origin X (design space).
@@ -623,6 +624,7 @@ static void load_config(void)
     // minimap_zoom-asi). bg+vp move together; zoom 0.53 (~47% of stock
     // 1.1338) widens the FOV substantially without making icons too small.
     g_cfg.patch_minimap       = 1;
+    g_cfg.no_vignette         = 1;     // NOP the 3 engine vignette-draw sites (clean edge-free view).
     g_cfg.minimap_bg_x        = 708.33f;
     g_cfg.minimap_bg_y        =  19.0f;
     g_cfg.minimap_vp_x        = 772.33f;
@@ -786,6 +788,7 @@ static void load_config(void)
         else if (_stricmp(key, "StreakDX")          == 0) g_cfg.streak_dx = (float)atof(val) * (1.0f/1.5f);
         else if (_stricmp(key, "StreakDY")          == 0) g_cfg.streak_dy = (float)atof(val) * (1.0f/1.5f);
         else if (_stricmp(key, "PatchMinimap")      == 0) g_cfg.patch_minimap = atoi(val);
+        else if (_stricmp(key, "NoVignette")        == 0) g_cfg.no_vignette = atoi(val);
         else if (_stricmp(key, "MinimapBgX")        == 0) g_cfg.minimap_bg_x = (float)atof(val);
         else if (_stricmp(key, "MinimapBgY")        == 0) g_cfg.minimap_bg_y = (float)atof(val);
         else if (_stricmp(key, "MinimapVpX")        == 0) g_cfg.minimap_vp_x = (float)atof(val);
@@ -4315,6 +4318,38 @@ static void apply_static_patches(const ws_scale_ctx *s)
             log_line("[pso_widescreen] listwindow y-anchor: installed @0x0073FF92");
     } else {
         log_line("[pso_widescreen] listwindow y-anchor: SKIP (disabled)");
+    }
+
+    // (5) NO-VIGNETTE — NOP the 3 engine in-game vignette-draw sites for a clean,
+    // edge-free view. Absolute VAs (no-ASLR base 0x00400000), patched via the
+    // shared patch_write() helper (VirtualProtect EXECUTE_READWRITE -> memcpy ->
+    // restore -> FlushInstructionCache). Stock-byte guarded BEFORE each write so
+    // re-running is a no-op AND a non-matching build is left untouched.
+    //   719B54: 77 0b (ja  0x00719B61)              -> 90 90   (two NOPs)
+    //   733BA7: 75 18 (jne 0x00733BC1)              -> 90 90   (two NOPs)
+    //   733A0E: 0f 84 9a 00 00 00 (je 0x00733AAE)   -> 90 e9 .. (FIRST 2 BYTES ONLY:
+    //           nop + the rel32 jmp opcode; the trailing 4 displacement bytes
+    //           9a 00 00 00 are LEFT INTACT and reused, so the jmp lands on the
+    //           same 0x00733AAE -> unconditionally skips the vignette-draw block).
+    if (g_cfg.no_vignette) {
+        static const uint8_t k_nop2[2]   = { 0x90, 0x90 };  // 719B54 / 733BA7
+        static const uint8_t k_nopjmp[2] = { 0x90, 0xE9 };  // 733A0E first 2 bytes
+        int n = 0;
+        __try {
+            if (((volatile uint8_t *)0x00719B54u)[0] == 0x77 &&
+                ((volatile uint8_t *)0x00719B54u)[1] == 0x0B) {
+                if (patch_write(0x00719B54u, k_nop2, 2, "no-vignette 719B54")) n++;
+            }
+            if (((volatile uint8_t *)0x00733BA7u)[0] == 0x75 &&
+                ((volatile uint8_t *)0x00733BA7u)[1] == 0x18) {
+                if (patch_write(0x00733BA7u, k_nop2, 2, "no-vignette 733BA7")) n++;
+            }
+            if (((volatile uint8_t *)0x00733A0Eu)[0] == 0x0F &&
+                ((volatile uint8_t *)0x00733A0Eu)[1] == 0x84) {
+                if (patch_write(0x00733A0Eu, k_nopjmp, 2, "no-vignette 733A0E")) n++;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+        log_line("[pso_widescreen] no-vignette: %d sites patched (719B54/733BA7/733A0E)", n);
     }
 }
 
