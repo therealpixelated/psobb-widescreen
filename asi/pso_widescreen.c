@@ -347,6 +347,7 @@ static struct {
     // 0x00804A5D (smaller = wider field of view).
     int   patch_minimap;       // 1 = bake minimap position + zoom. Default 1.
     int   no_vignette;         // 1 = NOP the 3 F12/in-game-MENU vignette sites (the dark menu-dim scrim). NOT mod_vignette (status FX). Default 1.
+    int   connect_fix;         // 1 = repoint the broken IME GetKeyboardLayout call @0x00841384 from the dead .data slot 0x008EC39C (baked 0xFFFFFC45) to the live IAT thunk 0x008F83A8. Fixes the AV-at-0xfffffc45 "connect" crash. Default 1.
     float minimap_bg_x;        // bg origin X (design space).
     float minimap_bg_y;        // bg origin Y.
     float minimap_vp_x;        // viewport origin X (design space).
@@ -625,6 +626,7 @@ static void load_config(void)
     // 1.1338) widens the FOV substantially without making icons too small.
     g_cfg.patch_minimap       = 1;
     g_cfg.no_vignette         = 1;     // F12/in-game-MENU vignette OFF (clean view). NOT mod_vignette (status FX).
+    g_cfg.connect_fix         = 1;     // repoint broken IME GetKeyboardLayout call -> live IAT thunk (fixes AV-at-0xfffffc45). Retires pso_connect_fix_dyn.ps1.
     g_cfg.minimap_bg_x        = 708.33f;
     g_cfg.minimap_bg_y        =  19.0f;
     g_cfg.minimap_vp_x        = 772.33f;
@@ -789,6 +791,7 @@ static void load_config(void)
         else if (_stricmp(key, "StreakDY")          == 0) g_cfg.streak_dy = (float)atof(val) * (1.0f/1.5f);
         else if (_stricmp(key, "PatchMinimap")      == 0) g_cfg.patch_minimap = atoi(val);
         else if (_stricmp(key, "NoVignette")        == 0) g_cfg.no_vignette = atoi(val);
+        else if (_stricmp(key, "ConnectFix")        == 0) g_cfg.connect_fix = atoi(val);
         else if (_stricmp(key, "MinimapBgX")        == 0) g_cfg.minimap_bg_x = (float)atof(val);
         else if (_stricmp(key, "MinimapBgY")        == 0) g_cfg.minimap_bg_y = (float)atof(val);
         else if (_stricmp(key, "MinimapVpX")        == 0) g_cfg.minimap_vp_x = (float)atof(val);
@@ -4558,6 +4561,41 @@ static void apply_static_patches(const ws_scale_ctx *s)
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { }
         log_line("[pso_widescreen] no-vignette: %d sites patched (719B54/733BA7/733A0E)", n);
+    }
+
+    // ---- CONNECT-FIX (RE: _re/connect_fix_deterministic.md) ----------------
+    // The IME / keyboard-layout routine sub_00841330 does a
+    //   0x00841384:  ff 15 9c c3 8e 00   call dword [0x008EC39C]
+    // but 0x008EC39C is a DEAD .data dword baked on disk to the literal
+    // 0xFFFFFC45 — nothing in the image ever writes a real pointer into it
+    // (verified: 0 matches for any mov-to-0x8EC39C). So the call jumps to
+    // 0xFFFFFC45 -> AV (the "connect crash"; the network/ws2 labels on the old
+    // pso_connect_fix_dyn.ps1 watcher were MISLABELED — this is an IME path).
+    // The slot is MEANT to hold user32!GetKeyboardLayout; the valid bound IAT
+    // thunk for it is 0x008F83A8, and the THREE sibling GetKeyboardLayout(0)
+    // sites (0x00840127-region / 0x0084152E / 0x0084179A) already call it
+    // correctly. Fix = repoint this one call to the live IAT thunk:
+    //   0x00841384:  ff 15 9c c3 8e 00 (call [0x008EC39C], broken)
+    //             -> ff 15 a8 83 8f 00 (call [0x008F83A8], the IAT thunk)
+    // Write only the 4-byte absolute-operand field at 0x00841386
+    // (9c c3 8e 00 -> a8 83 8f 00); the ff 15 opcode is unchanged.
+    // Race-free: the IAT thunk is loader-bound before the EXE entry runs, so
+    // 0x008F83A8 is always a valid user32 pointer — no copy to go stale, no
+    // poll, no reapply. patch_write flushes the icache (.text VA). Retires
+    // pso_connect_fix_dyn.ps1. DO NOT touch 0x00841327 (the watcher's "Patch 2"
+    // CALL) — sub_00841330 is SEH-wrapped and repointing that site is unsafe.
+    if (g_cfg.connect_fix) {
+        static const uint8_t k_iat_op[4] = { 0xA8, 0x83, 0x8F, 0x00 };  // LE 0x008F83A8
+        __try {
+            const volatile uint8_t *p = (const volatile uint8_t *)0x00841384u;
+            // Guard the FULL broken instruction signature before touching the operand.
+            if (p[0] == 0xFF && p[1] == 0x15 &&
+                p[2] == 0x9C && p[3] == 0xC3 && p[4] == 0x8E && p[5] == 0x00) {
+                if (patch_write(0x00841386u, k_iat_op, 4, "connect-fix 841386"))
+                    log_line("[pso_widescreen] connect-fix: IME call 0x00841384 repointed to GetKeyboardLayout IAT");
+            }
+            // else: already patched (ff 15 a8 83 8f 00) or a non-matching build -> no-op.
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
     }
 }
 
