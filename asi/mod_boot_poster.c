@@ -95,8 +95,8 @@ typedef struct {
 } D3DSURFACE_DESC8_X;
 
 typedef struct {
+    int   Pitch;       /* real D3D8 order: Pitch FIRST, then pBits (matches mod_video.c) */
     void *pBits;
-    int   Pitch;
 } D3DLOCKED_RECT_X;
 
 typedef HRESULT (STDMETHODCALLTYPE *Tex_LockRect_t)(
@@ -186,6 +186,13 @@ typedef HRESULT (STDMETHODCALLTYPE *GetViewport_t)(
 // PSOBB state addresses (rebase only; same as pso_widescreen.c).
 #define ADDR_SPLASH_ATLAS  0x00A3B080u  // becomes non-zero once SEGA splash starts
 #define ADDR_CURRENT_FLOOR 0x00AAFCA0u  // becomes non-zero once a real floor loads
+// Max texture dimension we'll hand the d3d8 wrapper. Some wrappers SEH on the
+// upload of an oversized texture, so any larger image is downscaled to fit (see
+// bp_downscale_rgba) rather than handed over raw.
+#define BP_MAX_TEX_DIM     1280
+// The earliest presents can fault the upload (swap chain not ready yet); retry up
+// to this many presents before giving up, instead of dying on the first fault.
+#define BP_UPLOAD_RETRY_PRESENTS 1200
 
 // ---- Module state ----
 
@@ -201,6 +208,7 @@ static struct {
     int     disable_after_splash;     // gate flag from cfg
     int     max_seconds;              // hard timeout from cfg
     float   max_screen_pct;           // 80 = 80% of screen
+    DWORD   t_first_drawn;            // GetTickCount() at first visible draw (0 = not yet)
     char    path[MAX_PATH];           // resolved (absolute) PNG path
 
     // Decoded asset (RGBA 8-bit, 4 channels)
@@ -226,6 +234,22 @@ static void bp_disable_perm(const char *reason)
     if (g_bp.disabled_perm) return;
     g_bp.disabled_perm = 1;
     log_line("[boot_poster] disabled: %s", reason ? reason : "(unknown)");
+}
+
+// Called by mod_video.c when the boot meteor takes over: permanently disables the
+// poster so it can't re-appear after the clip is skipped or ends.
+void boot_poster_force_disable(void)
+{
+    if (!g_bp.disabled_perm)
+        bp_disable_perm("boot video took over");
+}
+
+// How long the cover has been visibly drawn (ms), or 0 if it hasn't drawn yet.
+// mod_video gates the meteor on this so the cover gets its full moment no matter
+// how long the device took to become texture-able.
+DWORD boot_poster_shown_ms(void)
+{
+    return g_bp.t_first_drawn ? (GetTickCount() - g_bp.t_first_drawn) : 0;
 }
 
 static int bp_should_disable_now(void)
@@ -285,6 +309,38 @@ static void bp_resolve_path(const char *cfg_path, char *out, size_t outlen)
     for (char *p = out; *p; ++p) if (*p == '/') *p = '\\';
 }
 
+// Simple area-average downscale of an RGBA buffer (w x h) -> (nw x nh). Boot-
+// splash quality only; just fits any user-swapped PNG under the texture cap.
+// Returns a fresh malloc'd buffer (caller owns it) or NULL on alloc failure.
+static unsigned char *bp_downscale_rgba(const unsigned char *src, int w, int h, int nw, int nh)
+{
+    unsigned char *dst = (unsigned char *)malloc((size_t)nw * (size_t)nh * 4);
+    if (!dst) return NULL;
+    for (int dy = 0; dy < nh; ++dy) {
+        int sy0 = (int)((long long)dy * h / nh);
+        int sy1 = (int)((long long)(dy + 1) * h / nh);
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (int dx = 0; dx < nw; ++dx) {
+            int sx0 = (int)((long long)dx * w / nw);
+            int sx1 = (int)((long long)(dx + 1) * w / nw);
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            unsigned a0 = 0, a1 = 0, a2 = 0, a3 = 0, n = 0;
+            for (int sy = sy0; sy < sy1; ++sy) {
+                for (int sx = sx0; sx < sx1; ++sx) {
+                    const unsigned char *s = src + ((size_t)sy * w + sx) * 4;
+                    a0 += s[0]; a1 += s[1]; a2 += s[2]; a3 += s[3]; ++n;
+                }
+            }
+            unsigned char *d = dst + ((size_t)dy * nw + dx) * 4;
+            d[0] = (unsigned char)(a0 / n);
+            d[1] = (unsigned char)(a1 / n);
+            d[2] = (unsigned char)(a2 / n);
+            d[3] = (unsigned char)(a3 / n);
+        }
+    }
+    return dst;
+}
+
 static void bp_decode_png(void)
 {
     if (!g_bp.path[0]) {
@@ -309,6 +365,24 @@ static void bp_decode_png(void)
         p[0] = p[2];
         p[2] = r;
     }
+    // Auto-fit any user-swapped image under the texture cap (aspect-preserved),
+    // so a too-big PNG just shrinks instead of failing the upload.
+    if (w > BP_MAX_TEX_DIM || h > BP_MAX_TEX_DIM) {
+        int nw, nh;
+        if (w >= h) { nw = BP_MAX_TEX_DIM; nh = (int)((long long)h * BP_MAX_TEX_DIM / w); }
+        else        { nh = BP_MAX_TEX_DIM; nw = (int)((long long)w * BP_MAX_TEX_DIM / h); }
+        if (nw < 1) nw = 1;
+        if (nh < 1) nh = 1;
+        unsigned char *scaled = bp_downscale_rgba(rgba, w, h, nw, nh);
+        if (scaled) {
+            log_line("[boot_poster] downscaled %dx%d -> %dx%d to fit cap %d",
+                     w, h, nw, nh, BP_MAX_TEX_DIM);
+            stbi_image_free(rgba);
+            rgba = scaled;
+            w = nw;
+            h = nh;
+        }
+    }
     g_bp.rgba = rgba;
     g_bp.img_w = w;
     g_bp.img_h = h;
@@ -323,6 +397,16 @@ static int bp_upload_texture(IDirect3DDevice8 *dev)
 {
     if (g_bp.tex_uploaded) return 1;
     if (!g_bp.rgba || g_bp.img_w <= 0 || g_bp.img_h <= 0) return 0;
+    // Some d3d8 wrappers SEH on the upload of an oversized texture (a 1834-wide
+    // cover faulted here while the 1280x720 video texture uploaded fine). Reject
+    // anything bigger cleanly -- the meteor still plays; the user just keeps
+    // psobb_boot_poster.png within BP_MAX_TEX_DIM.
+    if (g_bp.img_w > BP_MAX_TEX_DIM || g_bp.img_h > BP_MAX_TEX_DIM) {
+        log_line("[boot_poster] image %dx%d exceeds max dimension %d -- disabling "
+                 "(resize psobb_boot_poster.png to fit)", g_bp.img_w, g_bp.img_h, BP_MAX_TEX_DIM);
+        bp_disable_perm("image exceeds device texture limit");
+        return 0;
+    }
     void **vt = *(void ***)dev;
     CreateTexture_t fnCreateTexture = (CreateTexture_t)vt[20];
     HRESULT hr = fnCreateTexture(dev, (UINT)g_bp.img_w, (UINT)g_bp.img_h,
@@ -333,6 +417,7 @@ static int bp_upload_texture(IDirect3DDevice8 *dev)
         bp_disable_perm("CreateTexture failed");
         return 0;
     }
+    { static int once = 0; if (!once) { log_line("[boot_poster] CreateTexture ok %dx%d", g_bp.img_w, g_bp.img_h); once = 1; } }
     void **tvt = *(void ***)g_bp.texture;
     Tex_LockRect_t   fnLockRect   = (Tex_LockRect_t)tvt[16];
     Tex_UnlockRect_t fnUnlockRect = (Tex_UnlockRect_t)tvt[17];
@@ -346,13 +431,19 @@ static int bp_upload_texture(IDirect3DDevice8 *dev)
         bp_disable_perm("LockRect failed");
         return 0;
     }
-    // Copy row by row to honor the surface pitch (which may exceed
-    // width*4 due to driver alignment).
+    // Pitch-CLAMPED row blit. The wrapper can hand back a pitch SMALLER than
+    // width*4 (a partial/staging lock); an unclamped copy then overruns the row
+    // and AVs -- the video path hit this exact thing (vid_blit_rows) and clamps
+    // the same way. copy = min(row_bytes, pitch).
     const int row_bytes = g_bp.img_w * 4;
+    size_t copy = (size_t)row_bytes;
+    if ((LONG)lr.Pitch > 0 && (size_t)lr.Pitch < copy) copy = (size_t)lr.Pitch;
+    { static int once = 0; if (!once) { log_line("[boot_poster] LockRect ok pitch=%ld row_bytes=%d copy=%u",
+                                                  (long)lr.Pitch, row_bytes, (unsigned)copy); once = 1; } }
     for (int y = 0; y < g_bp.img_h; ++y) {
         unsigned char *dst = (unsigned char *)lr.pBits + (size_t)y * (size_t)lr.Pitch;
         const unsigned char *src = g_bp.rgba + (size_t)y * (size_t)row_bytes;
-        memcpy(dst, src, (size_t)row_bytes);
+        memcpy(dst, src, copy);
     }
     fnUnlockRect(g_bp.texture, 0);
     g_bp.tex_uploaded = 1;
@@ -363,6 +454,18 @@ static int bp_upload_texture(IDirect3DDevice8 *dev)
     stbi_image_free(g_bp.rgba);
     g_bp.rgba = NULL;
     return 1;
+}
+
+// Release any (possibly half-created) texture so a faulted upload can be retried
+// cleanly on a later present without leaking a texture per attempt.
+static void bp_release_texture(void)
+{
+    if (!g_bp.texture) return;
+    __try {
+        void **tvt = *(void ***)g_bp.texture;
+        ((IUnknown_Release_t)tvt[2])(g_bp.texture);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { /* best effort */ }
+    g_bp.texture = NULL;
 }
 
 // Compute the centered, aspect-preserved rect within the viewport.
@@ -530,7 +633,14 @@ void boot_poster_on_present(void *device, int viewport_w, int viewport_h)
         __try {
             if (!bp_upload_texture(dev)) return;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            bp_disable_perm("upload SEH");
+            // The earliest presents can fault here -- the swap chain isn't ready
+            // yet (the video texture, created seconds later, uploads fine). Drop
+            // any half-made texture and retry on later presents instead of dying
+            // on the first fault. Bounded by the retry cap, max_seconds, and
+            // mod_video's force-disable when the meteor takes over.
+            bp_release_texture();
+            if (g_bp.present_calls >= BP_UPLOAD_RETRY_PRESENTS)
+                bp_disable_perm("upload SEH (gave up after retries)");
             return;
         }
     }
@@ -541,6 +651,7 @@ void boot_poster_on_present(void *device, int viewport_w, int viewport_h)
 
     __try {
         bp_render_quad(dev, x1, y1, x2, y2);
+        if (!g_bp.t_first_drawn) g_bp.t_first_drawn = GetTickCount();  // cover is now on screen
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         bp_disable_perm("render SEH");
     }

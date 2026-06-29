@@ -62,10 +62,6 @@
 #include "asset_registry.h"
 #include "pso_widescreen.h"
 
-// REFACTOR: sodaboy_tables.h retired — the entire Sodaboy LOOP/
-// Region coordinate bake was removed (anzz1 is the sole static coordinate
-// source of truth). No other TU consumes those tables.
-
 // ---- Minimal D3D8 ABI we need ----
 //
 // We don't include d3d8.h because it's not always present in modern SDKs
@@ -138,33 +134,6 @@ typedef struct {
 typedef HRESULT (STDMETHODCALLTYPE *SetViewport_t)(
     IDirect3DDevice8 *self, const D3DVIEWPORT8_X *pViewport);
 
-// FVF / vertex-shader tracking for HUDScale.
-// In d3d8, IDirect3DDevice8::SetVertexShader (vtable slot 50) takes a
-// DWORD that's either an FVF (low bits) or a vertex-shader handle. RHW
-// (transformed-and-lit) verts have the D3DFVF_XYZRHW bit (= 0x4) set in
-// their position type. Sodaboy's HUDScale only affects RHW geometry
-// because that's what the engine uses for HUD/UI/font/splash 2D draws.
-#define D3DFVF_POSITION_MASK 0x000e
-#define D3DFVF_XYZ           0x0002
-#define D3DFVF_XYZRHW        0x0004
-
-typedef HRESULT (STDMETHODCALLTYPE *SetVertexShader_t)(
-    IDirect3DDevice8 *self, DWORD Handle);
-
-// IDirect3DDevice8::DrawPrimitiveUP — slot 53. Engine submits 2D HUD
-// quads here with RHW pixel-space coords. We scale x/y by 1/HUDScale
-// so they cover more pixels (= bigger HUD) when HUDScale > 1.
-typedef HRESULT (STDMETHODCALLTYPE *DrawPrimitiveUP_t)(
-    IDirect3DDevice8 *self, DWORD PrimitiveType, UINT PrimitiveCount,
-    const void *pVertexStreamZeroData, UINT VertexStreamZeroStride);
-
-// IDirect3DDevice8::DrawIndexedPrimitiveUP — slot 54.
-typedef HRESULT (STDMETHODCALLTYPE *DrawIndexedPrimitiveUP_t)(
-    IDirect3DDevice8 *self, DWORD PrimitiveType,
-    UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount,
-    const void *pIndexData, DWORD IndexDataFormat,
-    const void *pVertexStreamZeroData, UINT VertexStreamZeroStride);
-
 // d3d8.dll!Direct3DCreate8 signature.
 typedef IDirect3D8 *(WINAPI *Direct3DCreate8_t)(UINT SDKVersion);
 
@@ -211,18 +180,6 @@ static struct {
                                // override_backbuffer + override_viewport. Default 0.
     int   fov_correction;      // 1 = scale projection m11 for hor+ widescreen
     float game_aspect;         // engine-assumed aspect ratio (default 4/3)
-    // REFACTOR: the Sodaboy LOOP/Region coordinate bake is RETIRED
-    // (anzz1 is the sole static coordinate source of truth). The following cfg
-    // fields are GONE: patch_validator_nop, patch_res_table, patch_hud_rects,
-    // patch_extra_ui, patch_flare_pin, patch_charscreen_scale,
-    // patch_asset_registry, load_asset_overrides_ini, patch_title_art,
-    // patch_title_real, title_real_mode, patch_phase3, widescreen_engine_anzz1.
-    // Their INI keys are accepted-and-ignored (unknown-key fall-through);
-    // WidescreenEngine specifically logs an obsolete-key warning for one
-    // release. override_backbuffer / override_viewport / fov_correction /
-    // logical_width / logical_height are KEPT — they are device-plumbing knobs
-    // consumed by the CreateDevice / SetViewport / SetTransform hooks, NOT
-    // sodaboy-apply selectors.
     int   patch_splash_phase2; // 1 = widen the SEGA/boot splash sprite-quad
                                // table at .data 0x009A3420 (4 entries × 0x20
                                // stride; x1@+0x00, x2@+0x08). D3 
@@ -237,34 +194,6 @@ static struct {
                                // positioning; >1 = HUD spread further toward
                                // edges; <1 = HUD shrinks toward 4:3 anchor (loses
                                // widescreen positioning). Default 1.0.
-    float hud_compress;        // RHW hook divide knob, decoupled from HUDScale.
-                               // 1.0 = no compression; >1 = HUD verts divided
-                               // around (0,0) → smaller HUD, more world visible.
-                               // This is the "MORE ROOM" knob.
-    // CURSOR-WARP FIX. PSOBB's in-game mouse menus physically
-    // SetCursorPos the OS pointer to the selected menu element. The warp
-    // target is computed from the engine's UI-scale globals ([0xAF035C]
-    // etc) at 3 sites (0x0070994B / 0x0070A018 / 0x0070A3FF), all of which
-    // call SetCursorPos through the SAME import slot [0x008F8344] — and
-    // those 3 are the ONLY callers of that slot in psobb.exe. But the HUD
-    // is additionally scaled OUTSIDE the engine-scale path: HUDCompress
-    // via a draw-time RHW center-divide (scale_rhw_apply) and HUDScale via
-    // Sodaboy .text imm32 rewrites. Neither updates [0xAF035C], so the OS
-    // cursor lands at the un-extra-scaled engine position while the element
-    // is DRAWN elsewhere → the pointer physically jumps off the element.
-    //
-    // Fix: import-hook [0x008F8344] and transform the warp target through
-    // the SAME center-relative scale the HUD is actually drawn at, so the
-    // OS cursor lands on the drawn element. Center = client-rect center
-    // (== backbuffer center for the RHW divide, which works in BB px).
-    // HUDCompress: drawn = center + (p-center)/compress  → cursor same.
-    // HUDScale:    drawn = center + (p-center)*hud_scale  (folded in too;
-    // the engine-scale globals carry the canonical 1.0 HUD
-    // position, the Sodaboy imm32 path grows it by hud_scale
-    // about the canvas, which to first order is a center-
-    // relative scale at the screen level).
-    // Default ON. Set CursorWarpFix=0 to disable for A/B testing.
-    int   cursor_warp_fix;
     // HANGAME-TITLE-MENU FIX (proven via live RE). The hangame
     // title "Login / Start Game / Exit Game" ListWindow is constructed by
     // sub_00761c48 (gated behind the hangame getter 0x0082D2F8) from an
@@ -279,39 +208,11 @@ static struct {
     // behind the logo). Setting X=530 centers the 220-wide box (center 640 ->
     // 960px); Y=560 drops it to the lower-center over "PRESS ENTER KEY".
     // LIVE-VALIDATED by writing the constructed container's X/Y and
-    // confirming on screen. INI: PatchHangameTitleMenu / HangameMenuX / HangameMenuY.
-    int   patch_hangame_title_menu;  // 1 = patch the 0x00974E08 layout struct. Default 1.
-    float hangame_menu_x;            // native (hs=1.0) X seeded into the menu. Default 320.
-    float hangame_menu_y;            // native (hs=1.0) Y seeded into the menu. Default 326.667.
-    // FLARE-SCALE (Bug 1), clean data-patch. The title photon
-    // flare (effect_nt particles, draw fcn.00801DF9 → 0x0082B440 @0x00802010)
-    // reads its size from a static effect-descriptor at 0x00A101C0: +0x14 =
-    // X-scale, +0x18 = Y-scale, both stock 4.0. LIVE-VALIDATED: writing 6.0
-    // (1.5×, matching the UI) widens the flare across the 16:9 canvas; it grows
-    // about its own (left) anchor so no recenter is needed; the write persists
-    // (nothing rewrites it at runtime) and the on-disk value is a static 4.0
-    // initializer, so an ASI-load patch sticks. We do NOT touch the shared
-    // projector globals [0xAF02xx] (the PatchFlarePin lesson).
-    // CAVEAT: 0x00A101C0 is an effect-TYPE descriptor array (stride 0x28);
-    // +0x14 is effect-type-0's scale, which MAY be shared by gameplay effects
-    // of type 0 (not confirmable statically). So this is **opt-in / default
-    // OFF** — enable PatchFlareScale=1 and verify in-game effects look right
-    // before relying on it. INI: PatchFlareScale / FlareScale.
-    int   patch_flare_scale;   // 1 = patch the 0x00A101C0 flare-descriptor scale. Default 0 (opt-in).
-    float flare_scale;         // X+Y scale written to the flare descriptor. Default 6.0 (1.5× of stock 4.0).
+    // confirming on screen.
     // RUNE-EMBLEM SCALE. Title circular rune seal (TitleEP4_11/_12,
     // the ring + 3 spinning orbs). Scales with the MASTER UI scale (hud_scale),
     // stock values read live from the binary. INI: PatchRuneScale (on/off).
     int   patch_rune_scale;    // 1 = scale the title rune emblem with the master UI scale. Default 1.
-    // PHOTON-STREAK MOVE. The title "photon blast" streak group (effect_nt,
-    // textures effect_nt.xvm #43 / descriptor 0x00A10878) is spawned by the title-scene
-    // constructor, which hardcodes its origin vector (0,0,-47) as three code immediates:
-    // X @ 0x006F8366 (stock 0.0), Y @ 0x006F8372 (stock 0.0), Z @ 0x006F837E (-47.0).
-    // Patched at ASI LOAD (before the title constructs), the streak is born at the new
-    // origin — clean, beam-only, no hook (the shared projector 0xAF02C8/CC is untouched).
-    // Offsets are design-space world units (resolution-independent; engine projects to
-    // the render res). INI: PatchStreakMove / StreakDX / StreakDY.
-    int   patch_streak_move;   // 1 = move the title photon streak. Default 1.
     // PHOTON-STREAK SCALE FIX. The streak emitter reads its viewport-space
     // spawn position as `[0x96E27C] * affine` (X) and `[0x96E278] * affine` (Y), where
     // affine = viewport_w / design_w = 1920 / (853.333 * hud_scale). At hud_scale > 1.0
@@ -330,29 +231,14 @@ static struct {
     // page transitions back to char-select. Stock ESC at the top does nothing
     // (deeper pages already back up one step in the engine). Additionally gated on
     // patch_charselect (the char-create escape hatch). Default 1.
-    // char-create knobs REMOVED. The fields cc_stretch / cc_content /
-    // cc_content_dx / cc_stride_left / cc_stride_right / cc_split / cc_debug drove
-    // the per-frame composer hook cc_quad_fix_c (@0x0082BB74), which was DELETED per
-    // the no-per-frame-patching mandate. They had no other readers, so the field
-    // decls + defaults are gone too. Char-create now renders via the static
-    // apply_startup_bakes() pass + stock; the runtime-only class-select content rows
-    // are intentionally not strided (no static source exists to bake).
-    float streak_dx;           // native (hs=1.0) origin-X offset (world units). Default 5.0.
-    float streak_dy;           // native (hs=1.0) origin-Y offset (world units). Default 0.0.
-    // MINIMAP zoom + position bake (folded in from the standalone
-    // minimap_zoom-asi). One-shot writes after anzz1 applies — anzz1 puts the
-    // minimap at bg=(693,64,128,128) / vp=(757,128,128,128) in 16:9 design
-    // space; this nudges it up-right and zooms it out. Knobs are absolute
-    // design-space coords (NOT deltas) and the zoom is the .text imm32 at
-    // 0x00804A5D (smaller = wider field of view).
-    int   patch_minimap;       // 1 = bake minimap position + zoom. Default 1.
+    // Char-create renders via the static apply_startup_bakes() pass + stock; the
+    // runtime-only class-select content rows are intentionally not strided (no
+    // static source exists to bake).
+    // MINIMAP corner-pin (CUSTOM 3). patch_minimap gates the corner-pin nudge knobs
+    // below (minimap_nudge_x/y, minimap_vp_dx/dy, minimap_corner_kx/ky) which re-project
+    // both minimap layers toward the top-right corner after the GATE_ALWAYS deanchor rows.
+    int   patch_minimap;       // 1 = apply the minimap corner-pin nudge. Default 1.
     int   no_vignette;         // 1 = NOP the 3 F12/in-game-MENU vignette sites (the dark menu-dim scrim). NOT mod_vignette (status FX). Default 1.
-    int   connect_fix;         // 1 = repoint the broken IME GetKeyboardLayout call @0x00841384 from the dead .data slot 0x008EC39C (baked 0xFFFFFC45) to the live IAT thunk 0x008F83A8. Fixes the AV-at-0xfffffc45 "connect" crash. Default 1.
-    float minimap_bg_x;        // bg origin X (design space).
-    float minimap_bg_y;        // bg origin Y.
-    float minimap_vp_x;        // viewport origin X (design space).
-    float minimap_vp_y;        // viewport origin Y.
-    float minimap_zoom;        // engine zoom divisor (smaller = zoomed out).
     // CUSTOM C3 — minimap corner nudge. ONE equal additive delta (design-space px)
     // applied to BOTH minimap X layers AFTER the kBakes deanchor.full rows set them
     // to their synced Ephinea positions: viewport X (0x00A11324) + background X
@@ -378,36 +264,6 @@ static struct {
     // the corner. INI: MinimapCornerKX / MinimapCornerKY.
     float minimap_corner_kx;   // default 0.60. X right-edge corner-track strength.
     float minimap_corner_ky;   // default 0.60. Y top-edge corner-track strength.
-    // REFACTOR: patch_phase3 (0x0082B440 splash inline hook),
-    // patch_title_art (0x82BB74 push-imm sites) and patch_title_real /
-    // title_real_mode (the 8 imm32 0x006f4cf2..0x006f4d66 rewrites) are
-    // RETIRED with the Sodaboy path — anzz1 owns the title plate via its
-    // 0x009FF080..1A8 floats + the 8 0x006F4CF2.. imm32 writes (anzz1:378-385).
-    // Their INI keys fall through harmlessly.
-    // (Historical title-art / title-real RE notes lived here; removed with
-    // the retired patch_title_art / patch_title_real fields. anzz1 owns the
-    // title plate now.)
-    // / RESOLVED quest-transition Y patch.
-    // Static RE pass (radare2) identified the quest-loading screen draw fn:
-    // fcn.0078ddb8 @ 0x0078ddb8  (gated on [0xa9ca40] & 0x2)
-    // reads quad-vert tables at 0x9ff080 (4 verts) and 0x9ff0e0 (4 verts),
-    // RHW-anchor at 0x9ff1a8 (NOW LOADING text); sprite emit goes through
-    // fcn.0082b148 -> fcn.00836d04 (24-byte src verts -> 28-byte d3d8 RHW).
-    // `f256_nowloading` (data 0x0097ab20) and `f064_questloadapn16`
-    // (data 0x0091f368) are asset names looked up by separate string-table
-    // readers — not the draw site, but they confirm the rendering path.
-    //
-    // Sodaboy's wrapper patches the X coords of these tables (Region A2 in
-    // this file already covers F480_M{16,144,272,143}); X coords are correct.
-    // But Y coords (352, 416, 480) are LEFT UNTOUCHED. Under d3d8to11 — which
-    // maps RHW directly to physical viewport — Y=480 lands at 480/1080 = 44%
-    // from top, putting all the loading-screen content in the upper-left
-    // quadrant. THIS is the "white frame edges in upper-left" symptom.
-    //
-
-    // (Was: phase1_max_call — removed cleanup. Was a knob for
-    // the now-dead patch_splash_phase1 path; never consumed since 2026-
-    // 05-06 phase-1 retirement.)
     int   debug_log;
     int   debug_log_verbose;   // 1 = firehose mode: emits the extra per-feature
                                // diagnostic lines (e.g. the char-create backdrop
@@ -415,10 +271,6 @@ static struct {
                                // must ALSO be 1 for the verbose lines to land
                                // in pso_widescreen.log (verbose is purely a
                                // gating extension on top of debug_log).
-    // (Was: publish_logical_canvas — removed cleanup.
-    // Deprecated since d3d8to11 wrapper update; the apply
-    // path is a logging no-op. Stack-detection logging that this knob
-    // gated is preserved separately via detect_d3d8_stack().)
 
     // ---- Boot poster (mod_boot_poster.c) ----
     // Centered PNG overlay during the very first "NOW LOADING" black
@@ -445,13 +297,9 @@ static struct {
     int   video_diag;              // VideoDiag          (1 = red half-quad diag)
     int   video_trigger;           // VideoTrigger       (VID_TRIGGER_OFF/BOOT/CHARCREATE)
     int   video_decoder;           // VideoDecoder       (VID_DECODER_MF/FFMPEG)
-    char  video_path[MAX_PATH];    // VideoPath          (source .mp4/.mov)
-    char  video_ffmpeg[MAX_PATH];  // VideoFfmpeg        ("" => "ffmpeg" on PATH)
-
-    // REFACTOR: widescreen_engine_anzz1 (the anzz1-vs-sodaboy
-    // mutual-exclusion selector) is GONE. anzz1 is the sole engine; there is
-    // no longer any if/else on a selector. The WidescreenEngine INI key is
-    // accepted-and-warned for one release (see load_config).
+    char  video_path[MAX_PATH];      // VideoPath        (CHAR-CREATE source .mp4)
+    char  video_boot_path[MAX_PATH]; // VideoBootPath    (BOOT source; trigger=both)
+    char  video_ffmpeg[MAX_PATH];    // VideoFfmpeg      ("" => "ffmpeg" on PATH)
 
     char  log_path[MAX_PATH];
 } g_cfg;
@@ -467,7 +315,6 @@ static struct {
 typedef struct {
     int   enabled;             // master: g_cfg.enabled. The ONE gate.
     float hud_scale;           // UI magnitude. 1.0 == front-end native.
-    float hud_compress;        // RHW divide ("MORE ROOM"); runtime path.
     float game_aspect;         // AR feeding the anzz1 extents.
     int   render_w, render_h;  // physical render res for the 0x009006F4 table.
     float A, B, C;             // anzz1 horizontal/atlas/vertical extents.
@@ -495,11 +342,12 @@ extern void boot_poster_log_summary(void);
 #define VID_TRIGGER_OFF         0
 #define VID_TRIGGER_BOOT        1
 #define VID_TRIGGER_CHARCREATE  2
+#define VID_TRIGGER_BOTH        3
 // VideoDecoder modes — MUST mirror the VID_DECODER_* macros in mod_video.h.
 #define VID_DECODER_MF          0
 #define VID_DECODER_FFMPEG      1
-extern void mod_video_init(const char *path, int enabled, int skippable,
-                           const char *ffmpeg_path, int max_seconds,
+extern void mod_video_init(const char *path, const char *boot_path, int enabled,
+                           int skippable, const char *ffmpeg_path, int max_seconds,
                            int skip_debounce_ms, int audio, int diag,
                            int trigger, int decoder);
 extern void mod_video_on_present(void *device, int viewport_w, int viewport_h);
@@ -585,64 +433,31 @@ static void load_config(void)
     g_cfg.override_viewport   = 0;
     g_cfg.integer_scale       = 0; // "bump base render" to a clean divisor; opt-in
     g_cfg.fov_correction      = 0;
-    g_cfg.game_aspect         = 16.0f / 9.0f;  // BAKED (was INI GameAspect=16:9)
-    // REFACTOR: Sodaboy LOOP/Region bake RETIRED — anzz1 is the
-    // sole static coordinate source of truth. patch_validator_nop /
-    // patch_res_table / patch_hud_rects / patch_extra_ui / patch_flare_pin /
-    // patch_charscreen_scale / patch_asset_registry / load_asset_overrides_ini
-    // defaults removed (fields gone).
-    g_cfg.patch_splash_phase2 = 0;  // BAKED OFF (was INI PatchSplashPhase2=0). on
+    g_cfg.game_aspect         = 16.0f / 9.0f;  // 16:9 (baked, no INI key)
+    g_cfg.patch_splash_phase2 = 0;  // default 0. On
                                     // the default path (folded into
                                     // apply_static_patches). 0x009A3420 quad
                                     // table; de-conflicted vs anzz1 (skips the
                                     // 2 X-coords anzz1 owns). Per-feature knob.
     g_cfg.hud_scale           = 1.0f;  // mem patches: canonical widescreen
-    g_cfg.hud_compress        = 1.0f;  // RHW divide: no compression by default
-    g_cfg.cursor_warp_fix     = 1;     // 2026-05-25: keep OS cursor on the
-                                       // drawn menu element under HUD scale.
-    g_cfg.patch_hangame_title_menu = 1;// 2026-05-25: center+lower the hangame
-                                       // title menu via the 0x974E08 struct.
-    g_cfg.hangame_menu_x      = 320.0f;       // native (hs=1.0) title menu X. Rebaked 480*(1/1.5).
-    g_cfg.hangame_menu_y      = 326.666687f; // native (hs=1.0) title menu Y. Rebaked 490*(1/1.5) -> bits 0x43A35556. (NOT 326.6666565f: that rounds to 0x43A35555, 1 ULP low.)
     g_cfg.patch_rune_scale    = 1;     // 2026-05-26: scale rune emblem with master UI scale.
     g_cfg.patch_charselect    = 1;     // Char-select 16:9 layout (info panel,
                                        // char list, frames, legend buttons +
                                        // footer Enter/Cancel stride pokes).
                                        // Model pan runs unconditionally via
                                        // patch_charselect_model_pan() (orthogonal world-space).
-    // char-create per-frame knob defaults REMOVED with the deleted
-    // cc_quad_fix_c composer hook (no-per-frame-patching mandate). Char-create is
-    // owned by the static apply_startup_bakes() pass; no per-frame cfg drives it.
-    g_cfg.patch_streak_move   = 0;     // 2026-06-17: DISABLED — Ephinea writes NOTHING to the
-                                       // streak imms 0x006F8366/72 (CONFIRMED absent from
-                                       // _ephinea_delta.csv); our 5px origin nudge was a pure
-                                       // divergence AND can't fix the real deanchor (streak
-                                       // GEOMETRY rides the affine). Leave the streak byte-stock.
-    g_cfg.streak_dx           = 5.0f;  // native (hs=1.0) streak X. Rebaked 7.5*(1/1.5).
-    g_cfg.streak_dy           = 0.0f;
+    // Char-create is owned by the static apply_startup_bakes() pass; no per-frame
+    // cfg drives it.
     g_cfg.patch_streak_scale  = 1;     // 2026-06-18: fix streak position at any HudScale.
-    // minimap bake (dialed live, replaces the standalone
-    // minimap_zoom-asi). bg+vp move together; zoom 0.53 (~47% of stock
-    // 1.1338) widens the FOV substantially without making icons too small.
+    // minimap corner-pin (CUSTOM 3). patch_minimap gates the nudge/corner knobs below.
     g_cfg.patch_minimap       = 1;
     g_cfg.no_vignette         = 1;     // F12/in-game-MENU vignette OFF (clean view). NOT mod_vignette (status FX).
-    g_cfg.connect_fix         = 1;     // repoint broken IME GetKeyboardLayout call -> live IAT thunk (fixes AV-at-0xfffffc45). Retires pso_connect_fix_dyn.ps1.
-    g_cfg.minimap_bg_x        = 708.33f;
-    g_cfg.minimap_bg_y        =  19.0f;
-    g_cfg.minimap_vp_x        = 772.33f;
-    g_cfg.minimap_vp_y        =  83.0f;
-    g_cfg.minimap_zoom        =  0.53f;
     g_cfg.minimap_nudge_x     =  48.0f;   // C3: nudge minimap right toward the corner.
     g_cfg.minimap_nudge_y     = -28.0f;   // C3 (owner): whole minimap UP toward the top corner.
     g_cfg.minimap_vp_dx       = -16.0f;   // C3 (owner): map graphic LEFT (inside the gray box).
     g_cfg.minimap_vp_dy       = -12.0f;   // C3 (owner): map graphic UP (inside the gray box).
     g_cfg.minimap_corner_kx   =  0.60f;   // C3 (owner): X corner-track strength (right as hs grows).
     g_cfg.minimap_corner_ky   =  0.60f;   // C3 (owner): Y corner-track strength (up as hs grows).
-    g_cfg.patch_flare_scale   = 0;     // 2026-05-26: opt-in (default OFF) until
-                                       // in-game effect-type-0 safety is checked.
-    g_cfg.flare_scale         = 6.0f;  // 1.5× of the stock 4.0 descriptor scale.
-    // REFACTOR: patch_phase3 / patch_title_art / patch_title_real /
-    // title_real_mode / widescreen_engine_anzz1 defaults removed (fields gone).
     g_cfg.debug_log           = 0;
     g_cfg.debug_log_verbose   = 0;
     // Boot poster defaults — feature ON by default, sensible auto-disable.
@@ -668,10 +483,12 @@ static void load_config(void)
                                         // (0x00829AD0) in mod_video.c.
                                         // Compile-time default; no INI key.
     g_cfg.video_diag             = 0;   // VideoDiag OFF by default
-    g_cfg.video_trigger          = VID_TRIGGER_CHARCREATE;  // intro at char-create
+    g_cfg.video_trigger          = VID_TRIGGER_BOTH;  // boot meteor + char-create intro
     g_cfg.video_decoder          = VID_DECODER_MF;   // in-process MF by default
     _snprintf_s(g_cfg.video_path, MAX_PATH, _TRUNCATE,
                 "patches\\video\\pso_intros_16x9.mp4");
+    _snprintf_s(g_cfg.video_boot_path, MAX_PATH, _TRUNCATE,
+                "patches\\video\\pso_bootseq_16x9.mp4");
     _snprintf_s(g_cfg.video_ffmpeg, MAX_PATH, _TRUNCATE,
                 "patches\\video\\ffmpeg.exe");
     char exe[MAX_PATH] = {0};
@@ -679,13 +496,12 @@ static void load_config(void)
     char *slash = strrchr(exe, '\\');
     if (!slash) return;
     *(slash + 1) = 0;
-    // OUR ASI reads ONLY from `patches\pso_widescreen.ini` (next to
-    // the .asi). The widescreen.cfg fallback was removed 
-    // sharing a config file with Sodaboy's d3d8.dll caused real
-    // confusion (an `Enabled=0` line in widescreen.cfg looks like a
-    // global widescreen kill-switch but only ever gated OUR ASI;
-    // Sodaboy's widescreen is gated solely by the presence of
-    // Width / Height keys). Two ASIs, two config files; no overlap.
+    // OUR ASI reads ONLY from `patches\pso_widescreen.ini` (next to the .asi),
+    // NOT Sodaboy's widescreen.cfg: sharing a config file caused real confusion
+    // (an `Enabled=0` line in widescreen.cfg looks like a global widescreen
+    // kill-switch but only ever gated OUR ASI; Sodaboy's widescreen is gated
+    // solely by the presence of Width / Height keys). Two ASIs, two config
+    // files; no overlap.
     //
     // If `pso_widescreen.ini` is missing we keep the in-source
     // defaults set above (which are intentionally `Enabled=0` so a
@@ -711,6 +527,7 @@ static void load_config(void)
     // intro-video auto-select below is skipped. If it didn't, the resolved
     // resolution's aspect picks 16:9 vs 4:3 (same threshold as enable).
     int video_path_explicit = 0;
+    int video_boot_path_explicit = 0;
     while (fgets(line, sizeof(line), f)) {
         // Trim trailing \r\n + leading whitespace.
         char *p = line;
@@ -745,72 +562,22 @@ static void load_config(void)
         else if (_stricmp(key, "OverrideBackBuffer")== 0) g_cfg.override_backbuffer = atoi(val);
         else if (_stricmp(key, "OverrideViewport")  == 0) g_cfg.override_viewport   = atoi(val);
         else if (_stricmp(key, "IntegerScale")      == 0) g_cfg.integer_scale       = atoi(val);
-        // REFACTOR: PatchValidatorNop / PatchResTable / PatchHudRects /
-        // PatchExtraUiAnchors / PatchFlarePin / PatchCharScreenScale /
-        // PatchAssetRegistry / LoadAssetOverridesIni / PatchPhase3 / PatchTitleArt /
-        // PatchTitleReal / TitleRealMode keys RETIRED with the Sodaboy path.
-        // Old INIs carrying them fall through harmlessly (unknown-key path).
         else if (_stricmp(key, "PatchSplashPhase2") == 0) g_cfg.patch_splash_phase2 = atoi(val);
         else if (_stricmp(key, "HUDScale")          == 0) {
             float s = (float)atof(val);
             if (s > 0.1f && s < 10.0f) g_cfg.hud_scale = s;
         }
-        else if (_stricmp(key, "HUDCompress")       == 0) {
-            float s = (float)atof(val);
-            if (s > 0.1f && s < 10.0f) g_cfg.hud_compress = s;
-        }
-        else if (_stricmp(key, "CursorWarpFix")     == 0) g_cfg.cursor_warp_fix = atoi(val);
-        else if (_stricmp(key, "PatchHangameTitleMenu") == 0) g_cfg.patch_hangame_title_menu = atoi(val);
-        // SINGLE-FRAME ingest-normalize: HangameMenuX/Y INIs are written
-        // in the legacy 1280x720 (hs=1.5) design space (the doc comments + any shipped
-        // INIs describe 1.5-space numbers). The g_cfg field is now native (hs=1.0), so
-        // pre-divide on ingest by the input-normalization constant (1.0f/1.5f). This is
-        // NOT a calibration frame — it's a one-time unit conversion of the INI value, so
-        // an unchanged INI lands bit-for-bit where it did before the refactor.
-        else if (_stricmp(key, "HangameMenuX")      == 0) {
-            float x = (float)atof(val);
-            if (x >= -2048.0f && x <= 4096.0f) g_cfg.hangame_menu_x = x * (1.0f/1.5f);
-        }
-        else if (_stricmp(key, "HangameMenuY")      == 0) {
-            float y = (float)atof(val);
-            if (y >= -2048.0f && y <= 4096.0f) g_cfg.hangame_menu_y = y * (1.0f/1.5f);
-        }
         else if (_stricmp(key, "PatchRuneScale")    == 0) g_cfg.patch_rune_scale = atoi(val);
         else if (_stricmp(key, "PatchCharSelect")   == 0) g_cfg.patch_charselect = atoi(val);
-        // the char-create per-frame knobs (CcStretch / CcContent /
-        // CcContentDx / CcStrideLeft / CcStrideRight / CcSplit / CcDebug) were
-        // REMOVED with the deleted cc_quad_fix_c composer hook. They were never
-        // INI-parsed; old INIs naming those keys still fall through harmlessly
-        // (unknown-key path). Char-create is owned by apply_startup_bakes() now.
-        else if (_stricmp(key, "PatchStreakMove")   == 0) g_cfg.patch_streak_move = atoi(val);
         else if (_stricmp(key, "PatchStreakScale")  == 0) g_cfg.patch_streak_scale = atoi(val);
-        // SINGLE-FRAME ingest-normalize: StreakDX/DY INIs are in legacy
-        // 1.5-space; pre-divide by the input-normalization constant (1.0f/1.5f) into the
-        // native field so an unchanged INI is bit-for-bit preserved (StreakDY=0 stays 0).
-        else if (_stricmp(key, "StreakDX")          == 0) g_cfg.streak_dx = (float)atof(val) * (1.0f/1.5f);
-        else if (_stricmp(key, "StreakDY")          == 0) g_cfg.streak_dy = (float)atof(val) * (1.0f/1.5f);
         else if (_stricmp(key, "PatchMinimap")      == 0) g_cfg.patch_minimap = atoi(val);
         else if (_stricmp(key, "NoVignette")        == 0) g_cfg.no_vignette = atoi(val);
-        else if (_stricmp(key, "ConnectFix")        == 0) g_cfg.connect_fix = atoi(val);
-        else if (_stricmp(key, "MinimapBgX")        == 0) g_cfg.minimap_bg_x = (float)atof(val);
-        else if (_stricmp(key, "MinimapBgY")        == 0) g_cfg.minimap_bg_y = (float)atof(val);
-        else if (_stricmp(key, "MinimapVpX")        == 0) g_cfg.minimap_vp_x = (float)atof(val);
-        else if (_stricmp(key, "MinimapVpY")        == 0) g_cfg.minimap_vp_y = (float)atof(val);
-        else if (_stricmp(key, "MinimapZoom")       == 0) {
-            float z = (float)atof(val);
-            if (z >= 0.1f && z <= 3.0f) g_cfg.minimap_zoom = z;
-        }
         else if (_stricmp(key, "MinimapNudgeX")     == 0) g_cfg.minimap_nudge_x = (float)atof(val);
         else if (_stricmp(key, "MinimapNudgeY")     == 0) g_cfg.minimap_nudge_y = (float)atof(val);
         else if (_stricmp(key, "MinimapVpDX")       == 0) g_cfg.minimap_vp_dx   = (float)atof(val);
         else if (_stricmp(key, "MinimapVpDY")       == 0) g_cfg.minimap_vp_dy   = (float)atof(val);
         else if (_stricmp(key, "MinimapCornerKX")   == 0) g_cfg.minimap_corner_kx = (float)atof(val);
         else if (_stricmp(key, "MinimapCornerKY")   == 0) g_cfg.minimap_corner_ky = (float)atof(val);
-        else if (_stricmp(key, "PatchFlareScale")   == 0) g_cfg.patch_flare_scale = atoi(val);
-        else if (_stricmp(key, "FlareScale")        == 0) {
-            float s = (float)atof(val);
-            if (s > 0.5f && s < 32.0f) g_cfg.flare_scale = s;
-        }
         else if (_stricmp(key, "GameAspect")        == 0) {
             // Allow override for unusual builds. Either bare float
             // ("1.333") or "W:H" form ("4:3", "16:10"). Default 4:3.
@@ -824,16 +591,12 @@ static void load_config(void)
             if (a > 0.1f && a < 10.0f) g_cfg.game_aspect = a;
         }
         else if (_stricmp(key, "WidescreenEngine")  == 0) {
-            // REFACTOR: the engine selector is GONE — anzz1 is the
-            // only engine. Accept-and-warn for one release so existing INIs
-            // don't appear broken; the value is otherwise ignored.
+            // anzz1 is the only engine; this selector key is obsolete. Accept-and-warn
+            // so existing INIs don't appear broken; the value is otherwise ignored.
             log_line("[pso_widescreen] WidescreenEngine='%s' is OBSOLETE; anzz1 is now the only engine (key ignored)", val);
         }
         else if (_stricmp(key, "DebugLogsEnabled")  == 0) g_cfg.debug_log = atoi(val);
         else if (_stricmp(key, "DebugLogVerbose")   == 0) g_cfg.debug_log_verbose = atoi(val);
-        // PublishLogicalCanvas removed cleanup — was a hint
-        // for an older d3d8to11 wrapper rev that's no longer relevant
-        // (current wrapper pins to physical viewport unconditionally).
         // Boot poster knobs — see [boot_poster] block in widescreen.cfg.sample.
         else if (_stricmp(key, "BootPosterEnabled")           == 0) g_cfg.boot_poster_enabled              = atoi(val);
         else if (_stricmp(key, "BootPosterPath")              == 0) {
@@ -856,13 +619,17 @@ static void load_config(void)
             _snprintf_s(g_cfg.video_path, MAX_PATH, _TRUNCATE, "%s", val);
             video_path_explicit = 1;
         }
+        else if (_stricmp(key, "VideoBootPath") == 0) {
+            _snprintf_s(g_cfg.video_boot_path, MAX_PATH, _TRUNCATE, "%s", val);
+            video_boot_path_explicit = 1;
+        }
         else if (_stricmp(key, "VideoSkippable") == 0) g_cfg.video_skippable = atoi(val);
         else if (_stricmp(key, "VideoFfmpeg")  == 0) {
             _snprintf_s(g_cfg.video_ffmpeg, MAX_PATH, _TRUNCATE, "%s", val);
         }
-        // VideoAudio INI key REMOVED. video_audio is now a compile-time
-        // default (BAKED ON in load_config) — our XAudio2 AAC track always plays with
-        // the intro cover and the engine intro audio is muted in parallel. No knob.
+        // video_audio is a compile-time default (BAKED ON in load_config) — our
+        // XAudio2 AAC track always plays with the intro cover and the engine intro
+        // audio is muted in parallel. No INI knob.
         else if (_stricmp(key, "VideoMaxSeconds") == 0) {
             int s = atoi(val);
             if (s >= 0 && s <= 600) g_cfg.video_max_seconds = s;
@@ -880,6 +647,7 @@ static void load_config(void)
             // the scripted starfield intro), per Stage 2.
             if      (_stricmp(val, "charcreate") == 0) g_cfg.video_trigger = VID_TRIGGER_CHARCREATE;
             else if (_stricmp(val, "boot")       == 0) g_cfg.video_trigger = VID_TRIGGER_BOOT;
+            else if (_stricmp(val, "both")       == 0) g_cfg.video_trigger = VID_TRIGGER_BOTH;
             else                                       g_cfg.video_trigger = VID_TRIGGER_OFF;
         }
         else if (_stricmp(key, "VideoDecoder") == 0) {
@@ -895,26 +663,21 @@ static void load_config(void)
         // and HUDScale needs an engine-side hook (TODO follow-up).
     }
     fclose(f);
-    // PSOHARNESS_HUDSCALE env override REMOVED per directive. The INI
-    // (Enabled + HUDScale) is the SINGLE source of truth for scale. No environment
-    // variable may silently override the INI — the old env path was leaving live
-    // clients force-scaled (e.g. 1.5) while the INI read 1.0, which is exactly the
-    // confusion this deletes. Harness A/B scale testing must edit the INI, not env.
+    // The INI (Enabled + HUDScale) is the SINGLE source of truth for scale — no
+    // environment variable overrides it. Harness A/B scale testing edits the INI.
     //
     // RESOLUTION SOURCE = launcher's widescreen.cfg. The launcher
     // writes the player's chosen resolution to widescreen.cfg in the exe ROOT
     // dir (NOT patches\). Read it as the PRIMARY resolution source when the INI
     // didn't pin Width/Height. Precedence: INI Width/Height > widescreen.cfg >
     // monitor (GetSystemMetrics, below). This feeds the aspect auto-detect.
-    // also read the launcher's WINDOW MODE here. The launcher writes
-    // the player's chosen mode (0=fullscreen, 1=windowed, 2=virtual/borderless
-    // fullscreen — Sodaboy convention, identical to ours; see g_cfg.windowed doc)
-    // into widescreen.cfg next to Width/Height. We previously read ONLY
-    // Width/Height, so a launcher set to "virtual widescreen" (Windowed=2) was
-    // silently dropped and the mod ran in a plain titled window. Read the cfg
-    // UNCONDITIONALLY (not only when Width/Height are unset) so the Windowed value
-    // is always picked up; an explicit Windowed= / Width= / Height= in
-    // pso_widescreen.ini still wins (windowed_explicit / nonzero g_cfg.width/height).
+    // also read the launcher's WINDOW MODE here. The launcher writes the player's
+    // chosen mode (0=fullscreen, 1=windowed, 2=virtual/borderless fullscreen —
+    // Sodaboy convention, identical to ours; see g_cfg.windowed doc) into
+    // widescreen.cfg next to Width/Height. Read the cfg UNCONDITIONALLY (not only
+    // when Width/Height are unset) so the Windowed value is always picked up; an
+    // explicit Windowed= / Width= / Height= in pso_widescreen.ini still wins
+    // (windowed_explicit / nonzero g_cfg.width/height).
     {
         char cfgpath[MAX_PATH];
         _snprintf_s(cfgpath, MAX_PATH, _TRUNCATE, "%swidescreen.cfg", exe);
@@ -1054,6 +817,15 @@ static void load_config(void)
             _snprintf_s(g_cfg.video_path, MAX_PATH, _TRUNCATE, "patches\\video\\pso_intros_4x3.mp4");
         log_line("[pso_widescreen] intro video: %s (AR=%.4f)", g_cfg.video_path, (double)ar);
     }
+    // BOOT video aspect-select (same threshold), for trigger=both / boot.
+    if (!video_boot_path_explicit && g_cfg.width > 0 && g_cfg.height > 0) {
+        float ar = (float)g_cfg.width / (float)g_cfg.height;
+        if (ar > 4.0f / 3.0f + 0.01f)
+            _snprintf_s(g_cfg.video_boot_path, MAX_PATH, _TRUNCATE, "patches\\video\\pso_bootseq_16x9.mp4");
+        else
+            _snprintf_s(g_cfg.video_boot_path, MAX_PATH, _TRUNCATE, "patches\\video\\pso_bootseq_4x3.mp4");
+        log_line("[pso_widescreen] boot video: %s (AR=%.4f)", g_cfg.video_boot_path, (double)ar);
+    }
     // Record which cfg file we ended up reading so the log makes the
     // path-resolution explicit (helps users diagnose "why aren't my
     // knobs taking effect" when both files exist).
@@ -1073,7 +845,6 @@ static void ws_compute_scale(ws_scale_ctx *s)
 {
     s->enabled      = g_cfg.enabled;
     s->hud_scale    = g_cfg.hud_scale;
-    s->hud_compress = g_cfg.hud_compress;
     s->game_aspect  = g_cfg.game_aspect;
 
     const float AR = g_cfg.game_aspect;
@@ -1107,14 +878,6 @@ static void ws_compute_scale(ws_scale_ctx *s)
 }
 
 // ---- Hook plumbing ----
-
-static volatile LONG g_draw_calls_total      = 0;
-static volatile LONG g_draw_calls_accepted   = 0;
-static volatile LONG g_draw_calls_rejected   = 0;
-static volatile LONG g_rej_invalid_args      = 0;
-static volatile LONG g_rej_no_player         = 0;
-static volatile LONG g_rej_bbox_too_big      = 0;
-static volatile LONG g_last_log_milestone    = 0;
 
 // IDirect3DDevice8::Present — slot 15. We intercept it to call the
 // boot-poster overlay BEFORE the engine flips the backbuffer, so the
@@ -1156,9 +919,6 @@ static Direct3DCreate8_t real_Direct3DCreate8 = NULL;
 static CreateDevice_t    real_CreateDevice    = NULL;
 static SetTransform_t    real_SetTransform    = NULL;
 static SetViewport_t     real_SetViewport     = NULL;
-static SetVertexShader_t real_SetVertexShader = NULL;
-static DrawPrimitiveUP_t real_DrawPrimitiveUP = NULL;
-static DrawIndexedPrimitiveUP_t real_DrawIndexedPrimitiveUP = NULL;
 static Present_t         real_Present         = NULL;
 static Reset_t           real_Reset           = NULL;
 static int               g_last_vp_w          = 0;  // last SetViewport-observed dims
@@ -1166,8 +926,6 @@ static int               g_last_vp_h          = 0;
 static int               g_vtable_patched     = 0;
 static int               g_device_patched     = 0;
 static int               g_logged_first_vp    = 0;
-static DWORD             g_current_fvf        = 0;
-static int               g_logged_first_hud   = 0;
 static int               g_logged_present_geom = 0;  // black-quadrant diag one-shot
 
 // Borderless-windowed style normalisation: PSOBB's window starts as a
@@ -1324,10 +1082,10 @@ static HRESULT STDMETHODCALLTYPE Hook_SetViewport(
 // In-game re-assert, fired once per FE->IG transition (defined below).
 static void ingame_reassert_on_transition(void);
 
-// The char-select 1.0-look PIN was REVERTED. Char-select now SCALES
-// with HudScale exactly like Ephinea (global affine 0x00ACC0E8 = 2.25/hud_scale,
-// design_w 0x0098A4B8 = 853.333*hud_scale) — NO pin, NO boot design_w/h capture.
-// patch_charselect_vertical() bakes the Ephinea-exact hs-scaled layout instead.
+// Char-select SCALES with HudScale exactly like Ephinea (global affine
+// 0x00ACC0E8 = 2.25/hud_scale, design_w 0x0098A4B8 = 853.333*hud_scale) — NO pin,
+// NO boot design_w/h capture. patch_charselect_vertical() bakes the Ephinea-exact
+// hs-scaled layout.
 
 // ---- ESC -> escape-the-char-create-trap poll (char-create scene 5 only) -----
 // ESC (VK_ESCAPE / DIK 1) is NOT in char-create's keymap, so the engine ignores
@@ -1365,13 +1123,6 @@ static void ingame_reassert_on_transition(void);
 // request() = the engine's scene-request post @0x007A60DC (cdecl, 1 int arg:
 // the requested scene id; writes [0xAAB388]=N, [0xAAB394]=1; the pump then sets
 // [0xAAB384]=N). request(2) stages scene 2 (TITLE).
-//
-// REMOVED (Ephinea-fidelity pass): the char-create class-DESCRIPTION-text X bake
-// (cc_text_force_f32 / cc_rightpane_offset / cc_text_early_bake, the macros
-// CC_TEXT_DESC_X_VA 0x004F4FA5 + CC_TEXT_DESC_X2_VA 0x0091E3F4 + CC_RIGHTPANE_X_FACTOR,
-// the g_cc_text_baked guard, and the local hs_peek_f32 fwd-decl). Ephinea's patchset
-// does NOT touch 0x004F4FA5 or 0x0091E3F4 — both stay stock 315.0. The Present-driven
-// call site is removed too.
 
 // Returns 1 if the device is currently in a usable (renderable) state, 0 if it
 // is lost / not-yet-reset (mid alt-tab under dgVoodoo2). We poll
@@ -1450,9 +1201,6 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
     IDirect3DDevice8 *self, const RECT *pSrc, const RECT *pDst,
     HWND hOverride, void *pDirtyRegion)
 {
-    // (FIX-A char-create description-text bake REMOVED — Ephinea-fidelity pass.
-    // 0x004F4FA5 / 0x0091E3F4 stay stock 315.0; no Present-driven text poke.)
-    //
     // LOST-DEVICE GUARD: on alt-tab in virtual fullscreen, dgVoodoo2 drops the
     // device (TestCooperativeLevel -> D3DERR_DEVICELOST / DEVICENOTRESET) and
     // our overlay resources are released until the Reset hook recreates them.
@@ -1461,13 +1209,14 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
     // straight through to the engine's Present, which itself returns DEVICELOST
     // harmlessly. The overlays resume automatically once the device is reset.
     if (device_is_usable(self)) {
-        __try {
-            boot_poster_on_present((void *)self, g_last_vp_w, g_last_vp_h);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            // Boot poster handler swallows its own exceptions internally;
-            // this is just an extra firewall so a wrapper-specific edge case
-            // never poisons the engine's Present.
-        }
+        // BOOT COVER moved into mod_video (2026-06-28): the still cover is now drawn
+        // by mod_video's boot leg through vid_draw_overlay's state capture/restore
+        // (which fades cleanly into the meteor), replacing this separate poster draw
+        // that had a struct-layout bug then a render-state leak (white-out of the
+        // SEGA logo + title). The deployed INI sets BootPosterEnabled=0; this call is
+        // ALSO gated off here so the poster never draws the boot cover even if
+        // re-enabled. mod_boot_poster.c stays compiled-but-unused (file not deleted).
+        // boot_poster_on_present((void *)self, g_last_vp_w, g_last_vp_h);  // disabled
         // P3 video (Stage 1). Cheap `if(!enabled) return;` no-op when disabled,
         // so VideoEnable=0 (default) is byte-identical to today. SEH-firewalled
         // the same way as the boot poster (mod_video also wraps internally).
@@ -1506,178 +1255,9 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     ingame_reassert_on_transition();   // edge-driven; no per-frame work
-    // char-select 1.0-look PIN reverted — char-select scales with
-    // HudScale like Ephinea (no per-frame design-divisor pin from Present).
+    // char-select scales with HudScale like Ephinea — no per-frame design-divisor
+    // pin from Present.
     return real_Present(self, pSrc, pDst, hOverride, pDirtyRegion);
-}
-
-// SetVertexShader (slot 50) — track current FVF so the draw hooks can
-// tell whether they're getting RHW (HUD) or world-space (3D) verts.
-// Handles with the high bits clear are FVF dwords; with the high byte
-// set they're vertex-shader handles. Either way we forward unchanged.
-static HRESULT STDMETHODCALLTYPE Hook_SetVertexShader(
-    IDirect3DDevice8 *self, DWORD Handle)
-{
-    g_current_fvf = Handle;
-    return real_SetVertexShader(self, Handle);
-}
-
-// Scale RHW HUD verts around their centroid, with save/restore so the
-// engine's buffer is left untouched once we return. Naive in-place
-// would compound across calls when psobb reuses a vertex buffer:
-// 1.5⁵ ≈ 7.6× by the 5th draw → off-screen → black. With save/restore
-// the scaling is a one-shot view modification per call.
-//
-// The save buffer lives on the caller's stack (HUD draws are tiny —
-// well under a few hundred verts) which avoids HeapAlloc latency in
-// the render hot path AND dodges the buffer-pointer-aliasing trap we
-// hit with HeapAlloc + memcpy (d3d8to11 requires the engine's original
-// src pointer, even when bytes are identical).
-//
-// Returns 1 if the buffer was modified — caller MUST then call
-// scale_rhw_restore after the real-call finishes; 0 otherwise.
-#define SCALE_SAVE_MAX_VERTS 4096
-
-static void log_call_milestone_if_due(void)
-{
-    LONG total = g_draw_calls_total;
-    if (total >= 100 && total / 500 != g_last_log_milestone / 500) {
-        g_last_log_milestone = total;
-        const volatile uint32_t *pc = (const volatile uint32_t *)0x00AAE168u;
-        log_line("[pso_widescreen] HUDCompress: total=%ld acc=%ld | rej_invalid=%ld rej_no_player=%ld rej_bbox=%ld | PlayerCount=%u fvf=0x%08x",
-                 (long)total, (long)g_draw_calls_accepted,
-                 (long)g_rej_invalid_args, (long)g_rej_no_player,
-                 (long)g_rej_bbox_too_big,
-                 (unsigned)*pc, g_current_fvf);
-    }
-}
-
-static int scale_rhw_apply(const void *src, UINT count, UINT stride,
-                           float *saved_xy /* size 2*count floats */)
-{
-    InterlockedIncrement(&g_draw_calls_total);
-    log_call_milestone_if_due();
-    if (g_cfg.hud_compress == 1.0f) return 0;
-    if (!src || stride < 16 || count == 0 || count > SCALE_SAVE_MAX_VERTS) {
-        InterlockedIncrement(&g_draw_calls_rejected);
-        InterlockedIncrement(&g_rej_invalid_args);
-        return 0;
-    }
-    // Scene gate REMOVED — user wants ALL screens compressed including
-    // title and select screens. Combined with centered-divide below, the
-    // "title art clustered upper-left" failure mode is gone: every quad
-    // shrinks toward the screen center instead of (0,0).
-    BYTE *p = (BYTE *)src;
-    float min_x = 1e30f, min_y = 1e30f, max_x = -1e30f, max_y = -1e30f;
-    for (UINT i = 0; i < count; ++i) {
-        const float *xy = (const float *)(p + (size_t)i * stride);
-        saved_xy[i*2 + 0] = xy[0];
-        saved_xy[i*2 + 1] = xy[1];
-        if (xy[0] < min_x) min_x = xy[0];
-        if (xy[0] > max_x) max_x = xy[0];
-        if (xy[1] < min_y) min_y = xy[1];
-        if (xy[1] > max_y) max_y = xy[1];
-    }
-    const float bbox_w = max_x - min_x;
-    const float bbox_h = max_y - min_y;
-    const float screen_w = (float)(g_cfg.width  > 0 ? g_cfg.width  : 1920);
-    const float screen_h = (float)(g_cfg.height > 0 ? g_cfg.height : 1080);
-    // Bbox cap REMOVED — user wants full-screen title art compressed too.
-    // We still skip if the bbox is genuinely degenerate (suspicious tiny
-    // line-list or single-vertex point) but otherwise pass everything.
-    (void)bbox_w; (void)bbox_h; (void)screen_w; (void)screen_h;
-    // HUDCompress "MORE ROOM": cfg=1.5 means each vert's offset from the
-    // SCREEN CENTER is divided by 1.5 — every quad shrinks toward
-    // center. Adjacent verts stay adjacent (no fragmentation), and
-    // centered things stay centered (no upper-left clustering). The
-    // entire visible 2D content occupies 1/1.5 of the screen, exposing
-    // more 3D world / black border depending on the screen.
-    const float inv = 1.0f / g_cfg.hud_compress;
-    const float cx = screen_w * 0.5f;
-    const float cy = screen_h * 0.5f;
-    for (UINT i = 0; i < count; ++i) {
-        float *xy = (float *)(p + (size_t)i * stride);
-        xy[0] = cx + (xy[0] - cx) * inv;
-        xy[1] = cy + (xy[1] - cy) * inv;
-    }
-    InterlockedIncrement(&g_draw_calls_accepted);
-    if (!g_logged_first_hud) {
-        g_logged_first_hud = 1;
-        log_line("[pso_widescreen] HUDCompress active: cfg=%.2f -> divide-by-cfg around (0,0) "
-                 "(first call count=%u stride=%u fvf=0x%08x bbox=%.0fx%.0f)",
-                 g_cfg.hud_compress, count, stride, g_current_fvf, bbox_w, bbox_h);
-    }
-    return 1;
-}
-
-static void scale_rhw_restore(const void *src, UINT count, UINT stride,
-                              const float *saved_xy)
-{
-    BYTE *p = (BYTE *)src;
-    for (UINT i = 0; i < count; ++i) {
-        float *xy = (float *)(p + (size_t)i * stride);
-        xy[0] = saved_xy[i*2 + 0];
-        xy[1] = saved_xy[i*2 + 1];
-    }
-}
-
-static HRESULT STDMETHODCALLTYPE Hook_DrawPrimitiveUP(
-    IDirect3DDevice8 *self, DWORD PrimitiveType, UINT PrimitiveCount,
-    const void *pVertexStreamZeroData, UINT VertexStreamZeroStride)
-{
-    // Vertex count = primitive count * vertices-per-prim, but for our
-    // scaling we only need the count of stride-sized records that must
-    // be touched. UP variants pack all verts into the buffer so:
-    // D3DPRIMITIVETYPE values from d3d8.h:
-    // 1 = D3DPT_POINTLIST       (vertex_count = primitive_count)
-    // 2 = D3DPT_LINELIST        (vertex_count = primitive_count * 2)
-    // 3 = D3DPT_LINESTRIP       (vertex_count = primitive_count + 1)
-    // 4 = D3DPT_TRIANGLELIST    (vertex_count = primitive_count * 3)
-    // 5 = D3DPT_TRIANGLESTRIP   (vertex_count = primitive_count + 2)
-    // 6 = D3DPT_TRIANGLEFAN     (vertex_count = primitive_count + 2)
-    UINT vcount;
-    switch (PrimitiveType) {
-        case 1: vcount = PrimitiveCount;       break;
-        case 2: vcount = PrimitiveCount * 2;   break;
-        case 3: vcount = PrimitiveCount + 1;   break;
-        case 4: vcount = PrimitiveCount * 3;   break;
-        case 5: vcount = PrimitiveCount + 2;   break;
-        case 6: vcount = PrimitiveCount + 2;   break;
-        default: vcount = PrimitiveCount * 3;  break;
-    }
-    float saved[2 * SCALE_SAVE_MAX_VERTS];
-    int modified = scale_rhw_apply(pVertexStreamZeroData, vcount,
-                                   VertexStreamZeroStride, saved);
-    HRESULT hr = real_DrawPrimitiveUP(self, PrimitiveType, PrimitiveCount,
-                                      pVertexStreamZeroData,
-                                      VertexStreamZeroStride);
-    if (modified) {
-        scale_rhw_restore(pVertexStreamZeroData, vcount,
-                          VertexStreamZeroStride, saved);
-    }
-    return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE Hook_DrawIndexedPrimitiveUP(
-    IDirect3DDevice8 *self, DWORD PrimitiveType,
-    UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount,
-    const void *pIndexData, DWORD IndexDataFormat,
-    const void *pVertexStreamZeroData, UINT VertexStreamZeroStride)
-{
-    float saved[2 * SCALE_SAVE_MAX_VERTS];
-    int modified = scale_rhw_apply(pVertexStreamZeroData, NumVertices,
-                                   VertexStreamZeroStride, saved);
-    HRESULT hr = real_DrawIndexedPrimitiveUP(self, PrimitiveType,
-                                             MinVertexIndex, NumVertices,
-                                             PrimitiveCount, pIndexData,
-                                             IndexDataFormat,
-                                             pVertexStreamZeroData,
-                                             VertexStreamZeroStride);
-    if (modified) {
-        scale_rhw_restore(pVertexStreamZeroData, NumVertices,
-                          VertexStreamZeroStride, saved);
-    }
-    return hr;
 }
 
 // Patch the device's vtable once the first device comes back from
@@ -1752,37 +1332,6 @@ static void patch_device_vtable(IDirect3DDevice8 *dev)
         log_line("[pso_widescreen] device vtable[40] VirtualProtect FAILED err=%lu",
                  GetLastError());
     }
-    // HUDScale hooks — only install when scaling is requested.
-    // Correct d3d8 IDirect3DDevice8 vtable slots:
-    // 72 = DrawPrimitiveUP        (NOT 53 — that's EndStateBlock)
-    // 73 = DrawIndexedPrimitiveUP (NOT 54 — that's ApplyStateBlock)
-    // 76 = SetVertexShader        (NOT 50 — that's SetRenderState)
-    if (g_cfg.hud_compress != 1.0f) {
-        if (VirtualProtect(&vt[76], sizeof(void*), PAGE_READWRITE, &old_prot)) {
-            real_SetVertexShader = (SetVertexShader_t)vt[76];
-            vt[76] = (void *)&Hook_SetVertexShader;
-            DWORD tmp = 0;
-            VirtualProtect(&vt[76], sizeof(void*), old_prot, &tmp);
-            log_line("[pso_widescreen] device vtable[76] patched: real SetVertexShader=0x%p",
-                     (void*)real_SetVertexShader);
-        }
-        if (VirtualProtect(&vt[72], sizeof(void*), PAGE_READWRITE, &old_prot)) {
-            real_DrawPrimitiveUP = (DrawPrimitiveUP_t)vt[72];
-            vt[72] = (void *)&Hook_DrawPrimitiveUP;
-            DWORD tmp = 0;
-            VirtualProtect(&vt[72], sizeof(void*), old_prot, &tmp);
-            log_line("[pso_widescreen] device vtable[72] patched: real DrawPrimitiveUP=0x%p (HUDCompress=%.2f)",
-                     (void*)real_DrawPrimitiveUP, g_cfg.hud_compress);
-        }
-        if (VirtualProtect(&vt[73], sizeof(void*), PAGE_READWRITE, &old_prot)) {
-            real_DrawIndexedPrimitiveUP = (DrawIndexedPrimitiveUP_t)vt[73];
-            vt[73] = (void *)&Hook_DrawIndexedPrimitiveUP;
-            DWORD tmp = 0;
-            VirtualProtect(&vt[73], sizeof(void*), old_prot, &tmp);
-            log_line("[pso_widescreen] device vtable[73] patched: real DrawIndexedPrimitiveUP=0x%p",
-                     (void*)real_DrawIndexedPrimitiveUP);
-        }
-    }
     g_device_patched = 1;
 }
 
@@ -1813,10 +1362,6 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateDevice(
         // engine renders to a surface that matches its res_table view of
         // the world, while the OS window sizes to PHYSICAL Width/Height
         // and the d3d8 wrapper handles BB->window upscaling at present.
-        // Previously we set BB to physical 3840x2160, which left the
-        // engine's 1920x1080 RHW coords in the upper-left quadrant of a
-        // 4K surface (visible as the SEGA splash filling only the top-
-        // left corner with the rest black).
         if (g_cfg.override_backbuffer) {
             const int lw = g_cfg.logical_width  > 0 ? g_cfg.logical_width  : 1920;
             const int lh = g_cfg.logical_height > 0 ? g_cfg.logical_height : 1080;
@@ -1968,11 +1513,6 @@ static int patch_iat(HMODULE mod, const char *target_dll, const char *target_fn,
 // (these are stable code/data signatures of the supported build).
 #define PSOBB_SIG_82D1D0 0x246c8b50u  // bytes "P\x8bl$" at code 0x0082d1d0
 #define PSOBB_SIG_82D1D4 0x15ff5568u  // bytes "hU\xff\x15"
-// (Was: PSOBB_SIG_482E20 / PSOBB_SIG_482E24 — removed cleanup.
-// They were defined for the patch_validator_nop path but never wired into
-// the sig_check() call. The validator NOP is gated by `g_cfg.patch_validator_nop`
-// only and defaults off because it depends on Sodaboy's 0x82d1d8 fn-ptr
-// hijack to provide a callback that's not present without the wrapper.)
 
 static int sig_check(uintptr_t addr, uint32_t expected, const char *label)
 {
@@ -2039,21 +1579,14 @@ static int redirect_call(uint32_t site, uint32_t expect_target, void *shim)
     return 1;
 }
 
-// SCALE-AWARE UI COORDS. The engine's 2D UI logical canvas scales
-// INVERSELY with HUDScale: logical_W = 853.33 * hud_scale, so the design->screen
-// matrix [0xACC0E8] = 1920 / (853.33 * hud_scale) = 2.25 / hud_scale. (Verified
-// live: HUDScale 1.0 -> canvas 853x480, matrix 2.25; HUDScale 1.5 -> 1280x720,
-// matrix 1.5.) All our title/menu/char-select design coords were dialed in the
-// standard 1280x720 space, i.e. the canvas at HUDScale 1.5. To hold the SAME
-// on-screen position at ANY HUDScale, a design coord must be written as
-// design_1.5 * (hud_scale / 1.5). This keeps the widescreen LAYOUT (goal 1)
-// fixed on screen independent of the HUD-scale knob (goal 2).
-// SINGLE-FRAME: kUiDesignScale (1.5) and the dual-calibration model
-// are REMOVED. Every UI design coord now lives in ONE native frame dialed at the
-// hs=1.0 canvas; ui_coord(x) is just x * hud_scale (uniform multiplier). The old
-// 1.5-space config defaults (hangame menu x/y, streak dx) were rebaked to their
-// native equivalents (value * (1.0f/1.5f)) so the engine receives bit-identical
-// values at hud_scale==1.0. `calib` is gone — there is no second frame.
+// SCALE-AWARE UI COORDS. The engine's 2D UI logical canvas scales INVERSELY with
+// HUDScale: logical_W = 853.33 * hud_scale, so the design->screen matrix
+// [0xACC0E8] = 1920 / (853.33 * hud_scale) = 2.25 / hud_scale. (Verified live:
+// HUDScale 1.0 -> canvas 853x480, matrix 2.25; HUDScale 1.5 -> 1280x720, matrix
+// 1.5.) Every UI design coord lives in ONE native frame dialed at the hs=1.0
+// canvas; ui_coord(x) = x * hud_scale (uniform multiplier) holds the same
+// on-screen position at any HUDScale, keeping the widescreen LAYOUT fixed
+// independent of the HUD-scale knob.
 static float ui_coord(float design)
 {
     float hs = g_cfg.hud_scale;
@@ -2062,35 +1595,15 @@ static float ui_coord(float design)
 }
 
 // ============================================================
-// CHAR-CREATE HEX BACKDROP 16:9 FILL — REMOVED (Ephinea-faithful rework).
+// CHAR-CREATE HEX BACKDROP 16:9 FILL (Ephinea-faithful).
 // ============================================================
-// The former cc_backdrop_emit tail-splice at 0x004ED06D (a per-frame emit of
-// extra 256px-stepped columns) is GONE. Ephinea has no such splice: its entire
-// char-create dressing-room backdrop model is the 24 ×(renderH/480 == ×hud_scale)
-// .data tiles (12 vec2f positions @0x0091DBxx + 12 u16 W/H shorts @0x009B77xx)
-// now declared as SRC_EPHINEA / GATE_CHARSELECT rows in kBakes[]. The hardcoded
-// 256px column step was MUTUALLY EXCLUSIVE with H-scaling the tiles (×2 tiles at
-// HudScale 2.0 would overlap the fixed step), so the splice was deleted to match
-// Ephinea 1:1. See the "SRC_EPHINEA char-create dressing-room tiles" block in
-// kBakes[].
+// The char-create dressing-room backdrop is the 24 ×(renderH/480 == ×hud_scale)
+// .data tiles (12 vec2f positions @0x0091DBxx + 12 u16 W/H shorts @0x009B77xx),
+// declared as SRC_EPHINEA / GATE_CHARSELECT rows in kBakes[]. Ephinea uses no
+// per-frame column-emit splice — see the "SRC_EPHINEA char-create dressing-room
+// tiles" block in kBakes[].
 
-// REMOVED: char-create class-info-box right-shift + hex-backdrop stretch splice
-// (cc_box_x_* / cc_box_y_*). Ephinea applies NO per-draw RenderChallengePanelElement
-// splice and NO tile scaling for char-create; its delta is the static design-width
-// widenings + honeycomb-frame + right-gradient widths/colors in kBakes[]. Deleted to
-// match Ephinea 1:1. (The char-create description-text bake — cc_rightpane_offset /
-// CC_RIGHTPANE_X_FACTOR / cc_text_early_bake — is also REMOVED; Ephinea leaves
-// 0x004F4FA5 + 0x0091E3F4 stock 315.0.)
 
-// REFACTOR: RETIRED with the Sodaboy path —
-// HUD_VANILLA / REF_W / REF_H (dead Sodaboy HUD-rect reference),
-// load_psobb_image / read_stock_dword / read_stock_float (stock-image
-// reader for the additive LOOP4/5/6 absolute conversion),
-// canvas_scale_t / compute_canvas_scale (Sodaboy LOOP scale derivation),
-// and the entire Phase-3 sprite-primitive inline hook on 0x0082B440
-// (splash_quad_rewrite_c / stub_82b440_phase3 / install_phase3_hook + its
-// globals). The MinHook include moved to the top of the file. anzz1 owns
-// the coordinate bake; the char-create composer MinHooks remain below.
 
 // CHAR-SELECT 3D MODEL pan — shim on the char-select scene's call to
 // ResetNPCCamera at 0x004138A3. Runs the ORIGINAL reset (0x0081E1F4), then pans
@@ -2571,22 +2084,14 @@ static int ld_ring_redirect(void)
 }
 
 // ====================================================================
-// char-select 1.0-PIN REVERTED — the native-frame constants
-// HS_FE_DESIGN_W/H_NATIVE were only used to bake the .data anchors below in a
-// FIXED 853 frame for the pin. With the pin gone, char-select SCALES with
-// HudScale (Ephinea-style), so the anchors below stride in the LIVE hud-scaled
-// frame (s->A / s->C). The macros are removed (no remaining users).
+// char-select SCALES with HudScale (Ephinea-style): the .data anchors below
+// stride in the LIVE hud-scaled frame (s->A / s->C).
 
 
-// ALL per-frame char-create render-thread machinery has been
-// REMOVED — the sub_0082BB74 composer hook (cc_quad_fix_c / cc_okbtn_install /
-// cc_classify_quad), the sub_0070D53C node logger, the sub_0070DEE4 reflow
-// observer, the sub_0082B440 info-text MOVE hook, the sub_0082B6BC panel-bake
-// probe, patch_charcreate_okcancel_anchors(), and the
-// cc_is_charcreate()/cc_scene_active()/cc_root_vtable_is() gate helpers are all
-// gone. Char-create is owned entirely by the static apply_startup_bakes() pass
-// (.text imm32 + .rdata float rewrites, value-guarded) plus stock geometry; the
-// runtime-only class-select content rows are intentionally not strided.
+// Char-create is owned entirely by the static apply_startup_bakes() pass (.text
+// imm32 + .rdata float rewrites, value-guarded) plus stock geometry; there is no
+// per-frame char-create render-thread machinery. The runtime-only class-select
+// content rows are intentionally not strided.
 
 // ============================================================
 // OVER-HEAD PLAYER NAME-LABEL SCALER — Ephinea FUN_52dc4f60 port.
@@ -2654,75 +2159,19 @@ static int patch_charselect_model_pan(void)
     return 1;
 }
 
-// REFACTOR: apply_sodaboy_patches (the entire Sodaboy LOOP1-6 +
-// Region A1/A2/G coordinate bake, ~800 lines, incl. the inline patch_res_table
-// / patch_validator_nop / patch_extra_ui Region-H / patch_title_real /
-// patch_title_art blocks) is RETIRED. anzz1 is the sole static coordinate
-// source of truth (see apply_static_patches -> apply_anzz1_widescreen).
 
-// Photon-blast lens flare position pin .
-// The function at psobb!0x0083A5F0 copies a state struct's fields into
-// three globals: canvas_div (0xAF02D8), flare X (0xAF02C8), flare Y
-// (0xAF02CC). It runs at title-screen entry, clobbering any user-
-// calibrated flare position written before that point.
-//
-// We NOP just the 17 bytes that write flare X/Y, leaving the canvas_div
-// write intact (we do want canvas_div updated by the engine; that's the
-// 1024x768-reference divisor for HUD-rect projection). After this patch
-// 0xAF02C8/CC stay wherever the tuner's INI override left them, no
-// per-frame re-apply needed.
-//
-// 0x0083A5F0:  8b 4c 24 04        mov ecx, [esp+4]
-// 0x0083A5F4:  8b 41 18           mov eax, [ecx+0x18]
-// 0x0083A5F7:  a3 d8 02 af 00     mov [0xAF02D8], eax     ; KEEP (canvas_div)
-// 0x0083A5FC:  8b 51 08           mov edx, [ecx+8]        ; NOP -+
-// 0x0083A5FF:  89 15 c8 02 af 00  mov [0xAF02C8], edx     ; NOP  | 17 bytes
-// 0x0083A605:  8b 41 0c           mov eax, [ecx+0xc]      ; NOP  |
-// 0x0083A608:  a3 cc 02 af 00     mov [0xAF02CC], eax     ; NOP -+
-// 0x0083A60D:  c3                 ret
-// ============================================================
-// Character-create / general scaling pass through 0x0082BB74
-// ============================================================
-// Per-call-site scale of the 7-float anchor+basis sprite struct that
-// 0x0082BB74 reads from ecx. Replaces the 5-byte CALL at 0x0082BB1B
-// (return-addr 0x0082BB20 — caller dominant during char-create) with
-// a CALL into a tiny FPU stub that scales:
-// anchor_x   = ecx[0x00] * stretch + shift_x
-// anchor_y   = ecx[0x04] * stretch + shift_y
-// basis_a_x  = ecx[0x0C] * stretch
-// basis_b_x  = ecx[0x10] * stretch
-// basis_a_y  = ecx[0x14] * stretch
-// basis_b_y  = ecx[0x18] * stretch
-//
-// Defaults: native 640x480 -> 1120x840 (1.75x), centered in 1920x1080
-// (shift_x = (1920 - 640*1.75) / 2 = 400,
-// shift_y = (1080 - 480*1.75) / 2 = 120).
-// Live-tunable via mod_widescreen_tuner sliders (resolves these globals
-// by name through GetProcAddress on pso_widescreen.asi).
-//
-// was a one-shot live-edit via psobbdbg /alloc + /write
-// to validate; baked here for persistence after the user confirmed
-// it correctly scaled the char-create UI.
+// Char-create scaling tuner globals — kept as a dllexport ABI for the external
+// mod_widescreen_tuner (resolved by name via GetProcAddress on pso_widescreen.asi).
 
 __declspec(dllexport) volatile float pso_widescreen_charscreen_stretch = 1.65f;
 __declspec(dllexport) volatile float pso_widescreen_charscreen_shift_x = 0.0f;
 __declspec(dllexport) volatile float pso_widescreen_charscreen_shift_y = 0.0f;
 
-// REFACTOR: apply_charscreen_scale_patch (0x0082BB1B FPU stub
-// redirect; superseded by the cc_okbtn composer), apply_charscreen_data_patches
-// (+ CharScreenFloat / kCharScreenSelectgamen; overlapped anzz1 0x8F8/0x8FA
-// floats) and apply_flare_pin_patch (0x0083A5FC NOP; collapsed login UI when on)
-// are RETIRED with the Sodaboy path. The dllexport pso_widescreen_charscreen_*
-// tuner globals above are KEPT for external (tuner) ABI compatibility.
 
-// FIX B: apply_splash_phase2() was DELETED. It sprite-scaled the six SEGA-splash
-// left/seam coords (0x009A3420/3428/3440/3448/3460/3480) by 4/3, which over-stretched
-// "SONIC TEAM(TM)" and dragged the blank right quad over the TM. Ephinea widens ONLY
-// the two right-quad x2 coords (0x009A3468/0x009A3488), which we keep via the anzz1
-// SRC_ANZZ1 "hud.w" kBakes rows. The function had no callers; the kBakes GATE_SPLASH
-// rows that did the same six widenings were deleted alongside it. The g_cfg
-// patch_splash_phase2 field is retained for cfg-ABI compatibility but no longer
-// widens anything.
+// SEGA-splash widening: Ephinea widens ONLY the two right-quad x2 coords
+// (0x009A3468/0x009A3488), kept via the anzz1 SRC_ANZZ1 "hud.w" kBakes rows. The
+// g_cfg patch_splash_phase2 field is retained for cfg-ABI compatibility but no
+// longer widens anything.
 
 // ============================================================
 // d3d8to11 logical-canvas hint 
@@ -2822,121 +2271,160 @@ static void detect_d3d8_stack(void)
              detected_stack_name(), g_detected_dll_path);
 }
 
-// publish_logical_canvas removed cleanup — was deprecated
-// since d3d8to11 wrapper update; function body had become a
-// pure no-op log line. detect_d3d8_stack() above continues to publish
-// the wrapper detection separately.
-
 // ============================================================
-// Cursor-warp fix (added 
+// BORN-BORDERLESS WINDOW HOOK (anzz1 CreateWindowExA arg-override)
 // ============================================================
-// PSOBB's in-game mouse menus warp the OS pointer to the selected
-// element. The warp formula (3 sites: 0x0070994B / 0x0070A018 /
-// 0x0070A3FF) maps a logical-canvas menu coord into client pixels using
-// the engine UI-scale globals [0xAF0350]/[0xAF0354]/[0xAF035C]; the
-// element is then DRAWN by the widget renderer (0x00733C2C/0x00733C36)
-// reading the SAME globals — so stock psobb is self-consistent.
+// Replaces the old make_borderless() post-creation restyle. anzz1's approach:
+// redirect psobb.exe's OWN CreateWindowExA call so the window is BORN as a
+// full-monitor WS_POPUP — no caption ever exists, no SetWindowLongPtr/
+// SWP_FRAMECHANGED churn, and the window's IME context is never detached.
 //
-// Our HUD-scale knobs scale the rendered HUD OUTSIDE that path:
-// - HUDCompress: a draw-time RHW center-divide (scale_rhw_apply) that
-// does  p' = center_px + (p - center_px) / compress  in backbuffer
-// pixel space (center = bb/client center).
-// - HUDScale: Sodaboy .text imm32 rewrites that grow the HUD about the
-// widescreen canvas.
-// Neither touches [0xAF035C], so the engine warp computes the
-// canonical (un-extra-scaled) position while the element is drawn
-// elsewhere → the OS cursor physically jumps off the drawn element.
+// Engine call site (disasm-verified against the on-disk psobb.exe, md5 e5bdb901):
+//   0x0082d1d6   ff 15 90 83 8f 00   call dword [0x008F8390]   ; user32!CreateWindowExA IAT
+//   0x0082d1dc   a3 d8 be ac 00      mov  [0x00ACBED8], eax    ; store HWND -> g_hWnd
+// The 4-byte operand (pointer-to-IAT-slot) lives at 0x0082D1D8. We rewrite it
+// from &[0x008F8390] to &g_pCreateWindowExA (a variable holding our hook), so
+// the engine's double-indirect `call dword [...]` lands on myCreateWindowExA
+// with the original 12 args, which we rewrite then forward to the real export.
 //
-// Fix: hook the SetCursorPos IMPORT SLOT in psobb.exe's IAT
-// ([0x008F8344]). Static RE confirms exactly 3 callers of that slot and
-// all 3 are the menu warp sites — so every call through it is a warp we
-// must correct. We transform the warp target through the same
-// center-relative scale the HUD is drawn at:
-//
-// S = (1 / HUDCompress) * HUDScale
-// out = center + (in - center) * S
-//
-// center = window client-rect center mapped to screen coords (the same
-// space SetCursorPos consumes — post-ClientToScreen). When both knobs
-// are 1.0, S == 1.0 and the transform is the identity (zero behavior
-// change), so this is safe to leave on unconditionally.
+// Wrapper-agnostic: this is a plain Win32 .text operand patch, independent of
+// crosire d3d8to9 / dgVoodoo / native d3d8 — none of them sit in the user32
+// window-create path. One 4-byte write, applied once, value-guarded.
 
-typedef BOOL (WINAPI *SetCursorPos_t)(int X, int Y);
-static SetCursorPos_t real_SetCursorPos = NULL;
-static volatile LONG  g_cursor_warps_seen     = 0;
-static volatile LONG  g_cursor_warps_adjusted = 0;
-static int            g_cursor_logged_first    = 0;
+#define kCreateWindowExA_OperandVA  0x0082D1D8u  // operand of `call dword [...]` @0x0082D1D6
+#define kCreateWindowExA_IATSlotVA  0x008F8390u  // expected current operand (user32!CreateWindowExA IAT)
 
-// Engine HWND global (push dword [0xACBED8] feeds GetClientRect /
-// ClientToScreen at all 3 warp sites).
-#define kEngineHwndVA  0x00ACBED8u
+typedef HWND (WINAPI *CreateWindowExA_t)(DWORD, LPCSTR, LPCSTR, DWORD, int, int, int, int,
+                                         HWND, HMENU, HINSTANCE, LPVOID);
 
-static BOOL WINAPI Hook_SetCursorPos(int X, int Y)
+// Monitor selection (R1): the owner runs a virtual widescreen display that is
+// NOT necessarily the Windows PRIMARY monitor, so we must NOT copy anzz1's
+// MonitorFromWindow(GetDesktopWindow()) primary capture. Pick the monitor whose
+// device-pixel rect matches the configured g_cfg Width/Height; fall back to the
+// primary monitor rect if no match (or no cfg dims).
+typedef struct {
+    int   want_w, want_h;
+    RECT  match;       // chosen monitor rect (valid if found)
+    RECT  primary;     // primary monitor rect (always captured)
+    int   found;
+    int   have_primary;
+} mon_pick_t;
+
+static BOOL CALLBACK mon_pick_cb(HMONITOR hMon, HDC hdc, LPRECT lprc, LPARAM data)
 {
-    InterlockedIncrement(&g_cursor_warps_seen);
-
-    const float compress = g_cfg.hud_compress;
-    const float scale    = g_cfg.hud_scale;
-    const float S = (compress != 0.0f ? (1.0f / compress) : 1.0f) * scale;
-
-    // Identity → pass straight through (also the disabled path).
-    if (!g_cfg.cursor_warp_fix || (S > 0.99999f && S < 1.00001f)) {
-        return real_SetCursorPos ? real_SetCursorPos(X, Y)
-                                 : SetCursorPos(X, Y);
+    (void)hdc; (void)lprc;
+    mon_pick_t *mp = (mon_pick_t *)data;
+    MONITORINFO mi; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoA(hMon, &mi)) return TRUE;
+    const int mw = mi.rcMonitor.right  - mi.rcMonitor.left;
+    const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    if (mi.dwFlags & MONITORINFOF_PRIMARY) {
+        mp->primary = mi.rcMonitor;
+        mp->have_primary = 1;
     }
-
-    int out_x = X, out_y = Y;
-    __try {
-        HWND hwnd = *(HWND volatile *)kEngineHwndVA;
-        RECT rc;
-        POINT center = {0, 0};
-        if (hwnd && GetClientRect(hwnd, &rc)) {
-            // Client-rect center, then map to screen (the space X/Y are in).
-            center.x = (rc.left + rc.right)  / 2;
-            center.y = (rc.top  + rc.bottom) / 2;
-            ClientToScreen(hwnd, &center);
-            const float cx = (float)center.x;
-            const float cy = (float)center.y;
-            out_x = (int)(cx + ((float)X - cx) * S + 0.5f);
-            out_y = (int)(cy + ((float)Y - cy) * S + 0.5f);
-            InterlockedIncrement(&g_cursor_warps_adjusted);
-            if (!g_cursor_logged_first) {
-                g_cursor_logged_first = 1;
-                log_line("[pso_widescreen] cursor-warp-fix: S=%.4f "
-                         "(1/HUDCompress=%.4f * HUDScale=%.4f) center=(%d,%d) "
-                         "first warp (%d,%d) -> (%d,%d)",
-                         S, (compress != 0.0f ? 1.0f / compress : 1.0f),
-                         scale, center.x, center.y, X, Y, out_x, out_y);
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        out_x = X; out_y = Y;  // never poison the engine's warp
+    if (!mp->found && mp->want_w > 0 && mp->want_h > 0 &&
+        mw == mp->want_w && mh == mp->want_h) {
+        mp->match = mi.rcMonitor;
+        mp->found = 1;
     }
-    return real_SetCursorPos ? real_SetCursorPos(out_x, out_y)
-                             : SetCursorPos(out_x, out_y);
+    return TRUE;  // keep enumerating so we always capture the primary too
 }
 
-// Install the SetCursorPos IAT hook on psobb.exe. SetCursorPos lives in
-// user32.dll. patch_iat() (defined above) finds the import descriptor
-// and swaps the slot, returning the original thunk so we can forward.
-static void install_cursor_warp_fix(void)
+// Resolve the target full-monitor rect. Returns 1 + fills *out on success.
+static int resolve_target_monitor_rect(RECT *out)
 {
-    if (!g_cfg.cursor_warp_fix) {
-        log_line("[pso_widescreen] cursor-warp-fix: SKIP (CursorWarpFix=0)");
+    mon_pick_t mp; memset(&mp, 0, sizeof(mp));
+    mp.want_w = g_cfg.width;
+    mp.want_h = g_cfg.height;
+    EnumDisplayMonitors(NULL, NULL, mon_pick_cb, (LPARAM)&mp);
+    if (mp.found) {
+        *out = mp.match;
+        return 1;
+    }
+    if (mp.have_primary) {
+        *out = mp.primary;
+        return 1;
+    }
+    // Last resort: virtual-screen origin + SM_CXSCREEN/CYSCREEN.
+    out->left = 0; out->top = 0;
+    out->right  = GetSystemMetrics(SM_CXSCREEN);
+    out->bottom = GetSystemMetrics(SM_CYSCREEN);
+    return (out->right > 0 && out->bottom > 0);
+}
+
+// The engine's call operand is rewritten to &g_pCreateWindowExA; g_pCreateWindowExA
+// holds the address of myCreateWindowExA (anzz1's exact double-indirection).
+static HWND WINAPI myCreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD style,
+                                     int x, int y, int w, int h,
+                                     HWND parent, HMENU menu, HINSTANCE inst, LPVOID param);
+static CreateWindowExA_t g_pCreateWindowExA = &myCreateWindowExA;
+
+static HWND WINAPI myCreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD style,
+                                     int x, int y, int w, int h,
+                                     HWND parent, HMENU menu, HINSTANCE inst, LPVOID param)
+{
+    // Always resolve the REAL export fresh (the IAT slot we redirected no longer
+    // points at it). user32 is loaded long before the engine creates its window.
+    CreateWindowExA_t real = (CreateWindowExA_t)GetProcAddress(
+        GetModuleHandleA("user32.dll"), "CreateWindowExA");
+    if (!real) {
+        // Should never happen; degrade gracefully to the public API symbol.
+        return CreateWindowExA(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
+    }
+
+    // Item 6: WS_CHILD / embedded (harness/editor reparent) — pass through
+    // untouched. A child must NEVER become a full-monitor WS_POPUP.
+    // Item 7: gate — override only when widescreen is enabled AND windowed is
+    // 0 (fullscreen) or 2 (borderless). windowed==1 (plain windowed) passes through.
+    if (parent != NULL || !g_cfg.enabled ||
+        (g_cfg.windowed != 0 && g_cfg.windowed != 2)) {
+        return real(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
+    }
+
+    RECT r;
+    if (resolve_target_monitor_rect(&r)) {
+        x = r.left;
+        y = r.top;
+        w = r.right  - r.left;
+        h = r.bottom - r.top;
+    }
+    style = WS_POPUP;                 // born borderless — no caption ever
+    ex    = WS_EX_APPWINDOW;          // show in taskbar / alt-tab (matches anzz1)
+    log_line("[pso_widescreen] born-borderless: WS_POPUP %d,%d %dx%d (cls=%s windowed=%d)",
+             x, y, w, h, cls ? cls : "(null)", g_cfg.windowed);
+    return real(ex, cls, name, style, x, y, w, h, parent, menu, inst, param);
+}
+
+// Install: one-shot 4-byte operand patch at 0x0082D1D8 (verify == 0x008F8390
+// before writing). Runs at ASI attach, before the engine creates its window.
+static void install_window_hook(void)
+{
+    if (!g_cfg.enabled) {
+        log_line("[pso_widescreen] born-borderless: SKIP (Enabled=0)");
         return;
     }
-    HMODULE psobb = GetModuleHandleA(NULL);
-    if (patch_iat(psobb, "user32.dll", "SetCursorPos",
-                  (void *)&Hook_SetCursorPos,
-                  (void **)&real_SetCursorPos)) {
-        log_line("[pso_widescreen] cursor-warp-fix: SetCursorPos IAT hooked "
-                 "(real=0x%p) HUDScale=%.2f HUDCompress=%.2f S=%.4f",
-                 (void *)real_SetCursorPos, g_cfg.hud_scale, g_cfg.hud_compress,
-                 (g_cfg.hud_compress != 0.0f ? 1.0f / g_cfg.hud_compress : 1.0f)
-                     * g_cfg.hud_scale);
-    } else {
-        log_line("[pso_widescreen] cursor-warp-fix: SetCursorPos NOT FOUND in "
-                 "psobb.exe import table — fix inactive");
+    DWORD *operand = (DWORD *)kCreateWindowExA_OperandVA;
+    DWORD old;
+    __try {
+        if (VirtualProtect(operand, sizeof(DWORD), PAGE_EXECUTE_READWRITE, &old)) {
+            if (*operand == kCreateWindowExA_IATSlotVA) {      // R5: verify before patch
+                g_pCreateWindowExA = &myCreateWindowExA;
+                *operand = (DWORD)(ULONG_PTR)&g_pCreateWindowExA;
+                log_line("[pso_widescreen] born-borderless: CreateWindowExA operand "
+                         "@0x%08X redirected (was 0x%08X)",
+                         kCreateWindowExA_OperandVA, kCreateWindowExA_IATSlotVA);
+            } else {
+                log_line("[pso_widescreen] born-borderless: WARN operand @0x%08X = "
+                         "0x%08X != 0x%08X — NOT patching",
+                         kCreateWindowExA_OperandVA, *operand, kCreateWindowExA_IATSlotVA);
+            }
+            DWORD tmp; VirtualProtect(operand, sizeof(DWORD), old, &tmp);
+        } else {
+            log_line("[pso_widescreen] born-borderless: VirtualProtect FAILED @0x%08X err=%lu",
+                     kCreateWindowExA_OperandVA, GetLastError());
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_line("[pso_widescreen] born-borderless: exception during install — skipped");
     }
 }
 
@@ -2947,10 +2435,9 @@ static void install_cursor_warp_fix(void)
 // cc_text_obs_c @0x0082B440 + the shared negative gate cc_scene_active) with full
 // authoritative-source ownership. Every char-create content element the frame-patch
 // moved is relocated at its TRUE static source (a .text bake immediate or a .rdata
-// float), keyed so 4:3 (design_w==640) is a byte-identical no-op. ALL char-create
-// render-thread MinHooks are DELETED (the last one, cc_quad_fix_c @0x0082BB74, was
-// removed per the no-per-frame-patching mandate) — 0x0082BB74 and
-// 0x0082B440 are byte-stock, so ship-select cannot leak (no hook to fire on it).
+// float), keyed so 4:3 (design_w==640) is a byte-identical no-op. 0x0082BB74 and
+// 0x0082B440 are byte-stock (no char-create render-thread hooks), so ship-select
+// cannot leak.
 //
 // All shifts derive from one quantity, evaluated once at apply time AFTER
 // apply_anzz1_widescreen (anzz1 owns design_w, the backdrop table, and the
@@ -3000,11 +2487,8 @@ static void cc_poke_imm_f32(uint32_t imm_va, float stock, float v)
 // a_plus_10==650 -> every v collapses to its stock -> cc_poke_imm_f32's
 // `if(*p==v)return` value-guard fires -> byte-identical stock at 640x480.
 //
-// This folds the former apply_charcreate_source_bake (the 4 char-create writes
-// are reproduced here verbatim — de-duped to ONE copy) and adds the 3 missed
-// Scene-02 login-menu ctor SEED copies. GATED/owed items (selectgamen plates,
-// char-create X1 0x0096E52C, char-select 0x004137DE final class, stats panel)
-// are deliberately NOT included this pass — see
+// GATED/owed items (selectgamen plates, char-create X1 0x0096E52C, char-select
+// 0x004137DE final class, stats panel) are deliberately NOT included in this pass.
 static void apply_startup_bakes(int render_w)
 {
     if (!g_cfg.patch_charselect) {
@@ -3012,59 +2496,22 @@ static void apply_startup_bakes(int render_w)
         return;
     }
     const float dw       = hs_peek_f32(0x0098A4B8u);   // design_w  (anzz1-owned, set first)
-    // (char-create content-row stride is RUNTIME-ONLY with no static source -> NOT
-    // baked and NOT strided; the per-frame hook that used to move it was deleted
-    // per the no-per-frame-patching mandate. See the Scene-09 note below.)
+    // (char-create content-row stride is RUNTIME-ONLY with no static source -> not
+    // baked/strided. See the Scene-09 note below.)
 
-    // ---- Scene 02 login-menu ctor SEED X bakes (0x007583C1/F3/40B) REMOVED ----
-    // Ephinea's patchset does not seed these; they are left stock (the TASK-A
-    // kBakes rows for the same VAs are also deleted). No boot dup remains.
 
-    // ---- Scene 09 char-create bake: the 4 MISTARGETED WordSelect writes are GONE ----
-    // The old writes here (0x006FFD80->[0xA96D60], 0x006FFCEA->[0xA96DA0],
-    // 0x0096E554, 0x0096E548) did NOT touch char-create. Live disasm + the harness
-    // symbol map proved those cells/floats belong to the in-game WordSelect /
-    // quick-chat / list-window menu, read ONLY by WordSelectMenu_State0x12_Update
-    // (0x00702488), ListWindowEntity_UpdatePosition (0x00706c78),
-    // CreateWordSelectMenuEntity (0x00701d00) and WordSelectEntity_ConfigA
-    // (0x00707d50). So baking them shifted the quick-chat list window +160px
-    // in-game/lobby (a global, scene-independent corruption) and did nothing for
-    // char-create. They are DELETED — do NOT reintroduce.
-    // See memory: charcreate-source-bake-mistargeted-wordselect.
 
-    // ---- Scene 09 char-create class-select CONTENT ROWS: runtime_only (NO bake) ----
-    // an adversarial 4-angle source-hunt CONFIRMED the right-pane CONTENT
-    // rows (class header, description, 9-slice border, per-row stat bars) have NO
-    // value-guard-bakeable static source — they are emitted by SHARED generic widget
-    // renderers (e.g. sub_0071ff10 @0x0071FF10) whose design X = runtime heap field
-    // + offset, never an immediate. the per-frame composer hook that used
-    // to stride these rows (cc_quad_fix_c @0x0082BB74) was DELETED per the
-    // no-per-frame-patching mandate, so the content rows are intentionally NOT
-    // strided — there is no allowed mechanism to move them and no static source to
-    // bake. The settled class-select screen renders correctly without it.
-    //
-    // NOTE: the hunt ALSO found a leak-safe static source for a SEPARATE element —
-    // the RenderVersionInfo-slot rect 0x006F4CC4 (right-pane X0=320 @0x006F4D4E,
-    // X1=576 @0x006F4D5E, char-create-exclusive). Baking it (+stride_R) was tried
-    // and REVERTED: it moves a DIFFERENT quad than the hook (RenderUIQuad backing vs
-    // composer rows), so on its own it detaches the backing from the rows, and it was
-    // NOT part of the known-good "what we had" state (which left it native). Whether
-    // that backing should ALSO slide for 16:9 is deferred to a LIVE draw_capture at
-    // scene 5 (front-end nav is server-blocked tonight) — do NOT re-add it unverified.
-    // See memory: charcreate-source-bake-mistargeted-wordselect.
+    // ---- Scene 09 char-create class-select CONTENT ROWS: runtime-only (NO bake) ----
+    // The right-pane CONTENT rows (class header, description, 9-slice border, per-row
+    // stat bars) have NO value-guard-bakeable static source — they are emitted by
+    // shared generic widget renderers (e.g. sub_0071ff10 @0x0071FF10) whose design X
+    // is a runtime heap field + offset, never an immediate. They are intentionally NOT
+    // strided (no static source to bake); the class-select screen renders correctly.
 
-    // ---- Scene 09 char-create class-select INFO BOX (the blue 9-slice panel):
-    // NO box-shift. Ephinea does NOT slide the class-info box for char-create; the
-    // box rides design_w via the static `hud.w` widenings only. The old per-draw
-    // RenderChallengePanelElement right-shift splice (and the earlier 10 mov-imm32
-    // ChallengeObjectSubPanel bakes, which Live draw_capture proved did NOT move the
-    // box — every element reads its X from a HEAP struct [ebx]) are both removed.
+    // ---- Scene 09 char-create class-select INFO BOX (the blue 9-slice panel): no
+    // box-shift. Ephinea does NOT slide the class-info box for char-create; the box
+    // rides design_w via the static `hud.w` widenings only.
 
-    // ---- F_VPRESET in-game 2D-affine SCALE_X/Y seeds (0x0082F8F4/0x0082F914) REMOVED ----
-    // These two imm32 operands are the `mov [0xACC0E8/0xACC0EC], 0x3f800000` identity-1.0
-    // affine-reset immediates. Ephinea leaves them STOCK 1.0 — poking them to render_w/dw
-    // is the over-patch that produced the lobby black bars (BUG-1). Boot dup deleted (the
-    // apply_special in-game-affine block is removed too). render_w param is now unused.
 
     // ---- Lobby game-list "NN-NN" bar 4:3 right-ceiling -> design_w (16:9 full width) ----
     // (static RE, disasm-verified). The lobby NN-NN/game-list bar is emitted
@@ -3084,26 +2531,9 @@ static void apply_startup_bakes(int render_w)
     // edge with no overshoot (server login was blocked when this shipped).
     cc_poke_imm_f32(0x00721FC0u, 640.0f, dw);     // NN-NN bar right-edge vertex X (853.33 @16:9 hs1.0)
 
-    log_line("[pso_widescreen] startup-bakes: done (dw=%.3f; login-seeds+F_VPRESET-affine removed; cc rows=runtime-only/not-strided; nnbar=dw)",
-             dw);
+    log_line("[pso_widescreen] startup-bakes: done (dw=%.3f; nnbar=dw)", dw);
 }
 
-// ============================================================
-// CHAR-CREATE CONTENT-STRIDE COMPOSER HOOK — DELETED 
-// ============================================================
-// Per the owner's no-per-frame-patching mandate, the per-frame char-create
-// composer detour on sub_0082BB74 (cc_quad_fix_c / stub_82bb74_charcreate /
-// cc_okbtn_install + the cc_classify_quad classifier and the [ccobs] OBSERVE
-// state) has been DELETED end-to-end. 0x0082BB74 is now byte-stock again.
-//
-// Char-create now renders via the static one-shot apply_startup_bakes() pass
-// (above) plus stock engine geometry. The class-select right-pane CONTENT rows
-// (class header / description / 9-slice border / per-row stat bars) are
-// RUNTIME-only widget-tree data with NO value-guard-bakeable static source, so
-// they are intentionally NOT strided — there is no allowed (non-per-frame)
-// mechanism to move them. (RE also showed the hook was mis-gated: it tested
-// *(int*)0x00AAB384==5, but live char-create class-select is scene==3 /
-// screen-id [0x00A165F0]==12, so the hook never fired there anyway.)
 
 // ============================================================
 // =====================================================================
@@ -3255,9 +2685,6 @@ static const bake_t kBakes[] = {
 /* fields: va, kind, base, coeff, offset, src, gate, stock, note, base2 */
   /* ---- SRC_ANZZ1 : 566 rows ---- */
   { 0x004011C0, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
-  /* REMOVED 2026-06-24: 0x009712DC anzz1.hard (=720-C, a hard-coded letterbox-edge
-     constant). NOT in Ephinea's json. The adjacent 0x009712EC (StageC_scalar, =gameRenderH)
-     IS in json and is kept. */
   { 0x009A3844, K_U32, B_D, 3.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A384C, K_U32, B_D, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A3858, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
@@ -3271,17 +2698,6 @@ static const bake_t kBakes[] = {
   { 0x009A38BC, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38C4, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
   { 0x009A38D8, K_U32, B_D, 2.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "atlas", B_LIT },
-  /* ===== REMOVED 2026-06-24 — 29 SRC_TRINITY MOD_X/Y over-patches =====
-     These front-end / in-game menu X/Y anchors are NOT in Ephinea's authoritative
-     cascade VA set (_eph_patchset.json). Ephinea leaves these dialogs at their
-     cascade-derived positions; our Trinity-reference flat recenters were over-patching
-     (the owner explicitly named 0x0091DC84 and 0x00970FF0). Removed VAs: 0x004EC0BE,
-     0x00790AF5, 0x00799ECA, 0x0091DC84, 0x0096E52C, 0x00970FF0, 0x00971350, 0x00971358,
-     0x00972070, 0x009721E0, 0x009721F8, 0x00972200, 0x00972208, 0x00972510, 0x00972538,
-     0x00972568, 0x009725D8, 0x009725F0, 0x009725F4, 0x009725F8, 0x00972600, 0x00972638,
-     0x00972640, 0x00972688, 0x00979BCC, 0x0097E458, 0x0097E468, 0x009F24E4, 0x009F986C.
-     (The 27 OTHER SRC_TRINITY rows that ARE in the json are kept verbatim — they're real
-     Ephinea cascade VAs that happened to carry a Trinity attribution.) */
   { 0x004011D2, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x004011DD, K_SET, B_C, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.h", B_LIT },
   { 0x004011EF, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
@@ -3743,13 +3159,11 @@ static const bake_t kBakes[] = {
   { 0x00972698, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
   { 0x00972700, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
   /* HANGAME title-menu (Login/Start Game/Exit Game) position struct {X@+0,Y@+4}.
-     Re-added 2026-06-25: the recode (31ac9f8 deleted patch_hangame_title_menu_layout;
-     e106314 pruned the apply_special block on a FALSE "Ephinea cascade covers it" — the
-     Ephinea byte-delta has NO row at 0x00974E08/0C because Ephinea never uses the Korean
-     Hangame login path). Left stock 4:3 (210/340) the menu sat left-of-center behind the
-     logo. center-anchor X / bottom-anchor Y, identical transform to the live-verified
-     E3C/E40 siblings below. Single private xref (push @0x00761C63) so GATE_ALWAYS is a
-     dead write on non-hangame boots; 4:3-safe (deltas are 0 at design 640x480). */
+     At stock 4:3 (210/340) the menu sits left-of-center behind the logo, so we
+     center-anchor X / bottom-anchor Y — identical transform to the live-verified
+     E3C/E40 siblings below. Single private xref (push @0x00761C63), so GATE_ALWAYS is
+     a dead write on non-hangame boots; 4:3-safe (deltas are 0 at design 640x480).
+     (Ephinea's byte-delta has no row here — it never uses the Korean Hangame login.) */
   { 0x00974E08, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hangame.menu.x", B_LIT },
   { 0x00974E0C, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hangame.menu.y", B_LIT },
   { 0x00974E3C, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
@@ -3851,9 +3265,6 @@ static const bake_t kBakes[] = {
   { 0x009B8DDC, K_SET, B_A, 1.0f, 0.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "hud.w", B_LIT },
   { 0x009D0040, K_SET, B_A, 0.5f, -128.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009D0044, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
-  /* REMOVED 2026-06-21 (forward-divergence prune): 0x009F0A80/88/90/98 deanchor.bottom
-     — anzz1 MOD_Y_B rows Ephinea patches in NEITHER its patchset NOR the byte-delta =
-     genuine over-patches (the double-patch pattern). 4:3 no-ops, safe to drop. */
   { 0x009F0ADC, K_SET, B_A, 1.0f, -157.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009F0AF4, K_SET, B_A, 1.0f, -288.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
   { 0x009F0B0C, K_SET, B_A, 1.0f, -157.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "anzz1.hard", B_LIT },
@@ -3986,7 +3397,7 @@ static const bake_t kBakes[] = {
   { 0x00410632, K_SET, B_A, 1.0f, -208.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D80000, "csel.tabdetails.x", B_LIT },
   { 0x0041066B, K_SET, B_A, 1.0f, -208.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43D80000, "csel.tabdetails.x", B_LIT },
   { 0x00410672, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.tab.details_off.y MOD_Y_B (stock 421)", B_LIT },
-  /* 0x004137C2 csel.footer.enter.x: Ephinea does NOT patch this (absent from delta) — it is left at stock 156 so it rides to the left edge in widescreen (Ephinea footer spread = Enter-left / Cancel-center / Tab-right). Our prior SRC_TRINITY center-anchor (0.5*A-164) removed to match Ephinea. */
+  /* 0x004137C2 csel.footer.enter.x: Ephinea does NOT patch this (absent from delta) — it is left at stock 156 so it rides to the left edge in widescreen (Ephinea footer spread = Enter-left / Cancel-center / Tab-right). */
   { 0x004137C9, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.enterkey.y MOD_Y_B (stock 421)", B_LIT },
   { 0x004137D7, K_SET, B_C, 1.0f, -59.0f, SRC_TRINITY, GATE_ALWAYS, 0x43D28000, "csel.esckey.y MOD_Y_B (stock 421)", B_LIT },
   /* 0x004137DE csel.footer.details.x: orphan imm + absent from the Ephinea delta — left at stock (no SRC_TRINITY patch, to match Ephinea). */
@@ -4008,32 +3419,38 @@ static const bake_t kBakes[] = {
   { 0x0096FFFC, K_SET, B_A, 0.5f, 0.0f, SRC_TRINITY, GATE_ALWAYS, 0x43A00000, "fe.f1help.x MOD_X_C +half", B_LIT },
   { 0x00972128, K_SET, B_A, 1.0f, -252.0f, SRC_TRINITY, GATE_ALWAYS, 0x43C20000, "ig.cmode_records.x (MOD_X_R)", B_LIT },
   { 0x00972138, K_SET, B_A, 0.5f, -50.0f, SRC_TRINITY, GATE_ALWAYS, 0x43870000, "ig.cmode_area_number_popup.x (MOD_X_C)", B_LIT },
-  /* REMOVED: 24 FIX-D dressing-room hex-tile rows (dr.tile.pos 0x0091DBxx +
-     dr.tile.wh 0x009B77xx). Ephinea does NOT scale char-create tiles — deleted
-     to match its delta. (K_U16 kind left defined for future use.) */
   /* ---- SRC_OURS : 11 rows ---- */
-  /* REMOVED (Ephinea-fidelity pass): 0x004EC0AF dr.honeycomb.enter_exit.right_edge
-     (4:3 no-op, not in Ephinea's patchset). */
   { 0x004EC951, K_SET, B_A, 1.0625f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x442A0000, "csel.honeycomb.frame", B_LIT },  /* 1.0625=680/640; res-scales design_w like Ephinea (1.0625*853.33~906). .text imm32 <0x008F8000 => icache flush. */
   { 0x006F49FD, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.outer.mag (code imm32 of `push 430.0`; ONE-S", B_LIT },
   { 0x006F4A57, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.seal.inner.mag (code imm32 of `push 178.0`; ONE-S", B_LIT },
-  /* OWNER-MANDATED PERMANENT NOPs (re-added 2026-06-21; the "Ephinea-fidelity" pass
-     WRONGLY removed these and the owner has re-instructed multiple times to keep them).
-     NOP the two `call 0x0082b558` emits in render_menu_hud — these draw the in-game F12
-     main-menu fade-curtain, which renders as SOLID BLACK BARS top+bottom at 16:9 when
-     the call is live (it emits a 4:3-extent curtain). Suppressing the call = no bars.
-     This is a standing custom (a 4th, beyond model-pan / rune / minimap). DO NOT REMOVE. */
-  /* CORRECTED label 2026-06-22 (wppaceyt4 disasm-verified): these two NOP'd call 0x82b558
-     sites draw the two CYAN HUD menu lines (color built @0x00719F5C `or ebp,0xedff` = 0xedff,
-     depth -10.0f), NOT the F12 black curtain. The owner's standing "keep these" directive is
-     RIGHT and matches the owner's own words ("the nops are for the thin cyan lines"). The real
-     F12 black BARS are the FOUR render_triangle_fan(0xff000000) 640x480 quads @0x0082b5d8 in
-     render_menu_hud — fixed by the in-game AFFINE (SHAPE A), NOT by a NOP. KEEP both entries. */
+  /* OWNER-MANDATED PERMANENT NOPs (a standing custom — DO NOT REMOVE). The two NOP'd
+     `call 0x0082b558` sites draw the two CYAN HUD menu lines (color built @0x00719F5C
+     `or ebp,0xedff` = 0xedff, depth -10.0f); suppressing them is the owner's standing
+     directive ("the nops are for the thin cyan lines"). NOTE: the real F12 black BARS
+     are the four render_triangle_fan(0xff000000) 640x480 quads @0x0082b5d8 in
+     render_menu_hud — fixed by the in-game AFFINE (SHAPE A), not a NOP. */
   { 0x00719F96, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x1115BDE8, "cyan HUD menu line .1 NOP call 0x82b558 (color edff; OWNER PERMA)", B_LIT },
   { 0x00719FD4, K_NOP, B_LIT, 0.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x11157FE8, "cyan HUD menu line .2 NOP call 0x82b558 (color edff; OWNER PERMA)", B_LIT },
   { 0x00721FC0, K_SET, B_A, 1.0f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x44200000, "lobby.nnbar.rightEdgeX (= dw; 640 4:3-ceiling raised t", B_LIT },
-  /* REMOVED (Ephinea-fidelity pass): 0x007583C1 / 0x007583F3 / 0x0075840B login-menu
-     X seeds (4:3 no-ops, not in Ephinea's patchset). */
+  /* Lost rows recovered by the signature sweep (dropped in the kBakes recode): two
+     screen-space center-X-320 elements (a photon particle + the loading-bar quad) that
+     re-center to design_w/2 in widescreen. 4:3 no-op via the 320.0 stock-guard. */
+  { 0x009F986C, K_SET, B_A, 0.5f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x43A00000, "effect.center.particle.x (re-anchor 320->design_w/2)", B_LIT },
+  { 0x00979BCC, K_SET, B_A, 0.5f, 0.0f, SRC_OURS, GATE_ALWAYS, 0x43A00000, "effect.center.loadingbar.x (re-anchor 320->design_w/2)", B_LIT },
+  /* Leftover 4:3 menus the table missed (sweep): list-windows HARDCODED at (320,240)
+     design-center instead of using the table-driven deanchor — help menu + lobby
+     Join/Create-Party submenu. Same {K_ADD B_A 0.5 -320} deanchor.half used 60x above;
+     4:3 no-op via the 320/240 stock-guards. */
+  { 0x0071B1A8, K_ADD, B_A, 0.5f, -320.0f, SRC_OURS, GATE_ALWAYS, 0x43A00000, "helpmenu.list.center.x", B_LIT },
+  { 0x0071B1B3, K_ADD, B_C, 0.5f, -240.0f, SRC_OURS, GATE_ALWAYS, 0x43700000, "helpmenu.list.center.y", B_LIT },
+  { 0x007989DA, K_ADD, B_A, 0.5f, -320.0f, SRC_OURS, GATE_ALWAYS, 0x43A00000, "lobby.joinparty.list.center.x", B_LIT },
+  { 0x007989E6, K_ADD, B_C, 0.5f, -240.0f, SRC_OURS, GATE_ALWAYS, 0x43700000, "lobby.joinparty.list.center.y", B_LIT },
+  /* Connecting cyan photon (patch->login/ship): standard 16:9 re-anchor like every other
+     front-end element. Lives bottom-right (X 545, Y 390) -> X right-anchored (design_w-95),
+     Y bottom-anchored (design_h-90). 4:3 no-op via the 545/390 stock-guards. Read by
+     0x007bc508 via fadd [0x0097E468] / [0x0097E458]. KEPT, just re-anchored. */
+  { 0x0097E468, K_SET, B_A, 1.0f, -95.0f, SRC_OURS, GATE_ALWAYS, 0x44084000, "effect.connecting.photon.x (545 -> design_w-95)", B_LIT },
+  { 0x0097E458, K_SET, B_C, 1.0f, -90.0f, SRC_OURS, GATE_ALWAYS, 0x43C30000, "effect.connecting.photon.y (390 -> design_h-90)", B_LIT },
   { 0x0096E114, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.size (live read*hud_scale, ONE-SHOT; no fixed", B_LIT },
   { 0x0096E168, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[0] (table -137,-79,137,-79,0,156; this fl", B_LIT },
   { 0x0096E16C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[1] (stock -79; ONE-SHOT live*hud_scale)", B_LIT },
@@ -4041,14 +3458,10 @@ static const bake_t kBakes[] = {
   { 0x0096E174, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[3] (stock -79; ONE-SHOT live*hud_scale)", B_LIT },
   { 0x0096E178, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[4] (stock 0; ONE-SHOT live*hud_scale)", B_LIT },
   { 0x0096E17C, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_OURS, GATE_RUNE, 0x00000000, "rune.orb.ofs[5] (stock 156; ONE-SHOT live*hud_scale)", B_LIT },
-  /* FIX B: the six GATE_SPLASH left/seam coords (0x009A3420/3428/3440/3448/3460/3480)
-     were DELETED — sprite-scaling them over-stretched "SONIC TEAM(TM)" and dragged the
-     blank right quad over the TM. Ephinea widens ONLY the two right-quad x2 coords
-     (0x009A3468/0x009A3488), kept via the anzz1 SRC_ANZZ1 "hud.w" rows above. */
-  /* REMOVED (Ephinea-fidelity pass): minimap vp/bg W/H rows 0x00A1132C / 0x00A11330 /
-     0x00A11400 / 0x00A11404 — all inert stock-128 size fields, not in Ephinea's
-     patchset. (The minimap X-anchors 0x00A11324 + 0x00A113E8 stay as SRC_ANZZ1
-     deanchor.full rows; custom C3 nudges them in apply_special.) */
+  /* SEGA-splash: Ephinea widens ONLY the two right-quad x2 coords (0x009A3468/
+     0x009A3488), kept via the anzz1 SRC_ANZZ1 "hud.w" rows above. The six left/seam
+     coords (0x009A3420/3428/3440/3448/3460/3480) stay stock — scaling them
+     over-stretches "SONIC TEAM(TM)". */
   /* ---- SRC_EPHINEA : 31 X-axis widens the recode MISSED ----
      Re-verified 2026-06-21 by cross-checking the FULL byte-delta vs this table:
      Ephinea widens these VAs but our table never referenced them, so they sat at
@@ -4059,19 +3472,12 @@ static const bake_t kBakes[] = {
      0x00785xx (InitializeEndingViewport), char-select anchor block 0x008F9E-B1
      (FLOAT_008f9xxx, beside the 92-VA block), congrats/results name-X 0x009CA5
      (Trinity-confirmed center), plus align-list 0x009721 + misc fe floats. */
-  /* REMOVED 2026-06-24: 4 "fe.menu0409.w" over-patches (0x0040934C/00409398/004093B0/
-     004093C8 — fcn.00409340 menu X-positions 301/50). NOT in Ephinea's json. The
-     neighbouring 0x0040CAxx "fe.menu040c.w" rows below ARE in json (92VA_L1_Wmul) — kept. */
   { 0x0040CA07, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43540000, "fe.menu040c.w", B_LIT },
   { 0x0040CA40, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43540000, "fe.menu040c.w", B_LIT },
   { 0x0040CA66, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43650000, "fe.menu040c.w", B_LIT },
   { 0x0040CA8C, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43650000, "fe.menu040c.w", B_LIT },
   { 0x0040CAE2, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43CC8000, "fe.menu040c.w", B_LIT },
   { 0x0040CB1E, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43CC8000, "fe.menu040c.w", B_LIT },
-  /* REMOVED 2026-06-24: 9 "ending.vp.w" over-patches (0x00785679..0x00785C42 — the
-     credits/ending InitializeEndingViewport INNER X-positions 100/316/616/340/10). NOT in
-     Ephinea's json; Ephinea scales only the W/H fields of that same function (those W/H VAs
-     are in Loop1_W/Loop2_H and remain patched). These inner positions were over-patching. */
   { 0x008F9EC0, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x42C80000, "csel.block.w", B_LIT },
   { 0x008F9F20, K_ADD, B_A,      0.5f, -320.0f, SRC_EPHINEA, GATE_ALWAYS, 0x4407C000, "csel.block.cx", B_LIT },
   { 0x008FB114, K_MUL, B_WIDENX, 1.0f,    0.0f, SRC_EPHINEA, GATE_ALWAYS, 0x43A00000, "csel.block.w", B_LIT },
@@ -4138,8 +3544,8 @@ static const bake_t kBakes[] = {
      RenderChallengePanelBackground_004ed008 / RenderUIPiece_0082b6bc). 24 .data VAs:
      12 vec2f positions (K_MUL B_HUDSCALE, ×hud_scale on the live stock float) + 12
      u16 W/H sizes (K_U16 B_HUDSCALE, 16-bit RMW ×hud_scale, round-to-nearest). Both
-     are bit-exact no-ops at HudScale 1.0 (4:3) and 2× at HudScale 2.0. This REPLACES
-     the deleted cc_backdrop_emit splice (Ephinea has no per-frame column emit). */
+     are bit-exact no-ops at HudScale 1.0 (4:3) and 2× at HudScale 2.0. Ephinea has
+     no per-frame column-emit splice for these. */
   /* dressing-room tile X/Y positions — Ephinea float H-loop (×renderH/480 = ×hud_scale) */
   { 0x0091DBD0, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43C00000, "cc.tile.id12.X (384)",  B_LIT },
   { 0x0091DBD8, K_MUL, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x43C00000, "cc.tile.id13.X (384)",  B_LIT },
@@ -4166,6 +3572,10 @@ static const bake_t kBakes[] = {
   { 0x009B7822, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id16.H (128)",  B_LIT },
   { 0x009B7834, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id17.W (128)",  B_LIT },
   { 0x009B7836, K_U16, B_HUDSCALE, 1.0f, 0.0f, SRC_EPHINEA, GATE_CHARSELECT, 0x00000080, "cc.tile.id17.H (128)",  B_LIT },
+/* RESTORED 2026-06-28: the FULL committed 61-row Trinity gap-fill — the state with the
+   in-game nameplate, minimap box, and title corner element anchored correctly ("before
+   our recent patches", per the owner). A verified-subset experiment deanchored those
+   (nameplate rode up, minimap box off-screen), so we keep the full set. */
 #include "_trinity_gapfill.inc"
 };
 
@@ -4220,7 +3630,6 @@ static int gate_on(uint8_t gate)
         case GATE_MINIMAP:      return g_cfg.patch_minimap;
         case GATE_RUNE:         return g_cfg.patch_rune_scale;
         case GATE_STREAK_SCALE: return g_cfg.patch_streak_scale;
-        case GATE_HANGAME:      return g_cfg.patch_hangame_title_menu;
         case GATE_SPLASH:       return g_cfg.patch_splash_phase2;
         default:                return 1;
     }
@@ -4439,11 +3848,7 @@ static void minimap_corner_pin(uint32_t va, float design, float native,
    0x00A11324 + background 0x00A113E8), which the kBakes deanchor.full rows have just
    set to their synced Ephinea positions. Equal delta on both keeps fg+bg locked
    together (the desync fix); Y (0x00A1133C/0x00A113F4) and the size fields
-   (0x00A11328/0x00A113EC) are left exactly as Ephinea / the kBakes pass set them.
-   The removed over-patch blocks (minimap absolute writes, in-game F_VPRESET affine,
-   hangame title-menu absolute writes) are gone — Ephinea positions all of those via
-   its faithful cascade VAs (already covered by kBakes rows) and leaves the affine
-   reset stock 1.0. */
+   (0x00A11328/0x00A113EC) are left exactly as Ephinea / the kBakes pass set them. */
 static void apply_special(const ws_scale_ctx *s)
 {
     /* C3 (ours): pin the minimap to the top-right corner with a SCREEN-CONSTANT position — it
@@ -4484,15 +3889,14 @@ static void apply_static_patches(const ws_scale_ctx *s)
     // 4:3-identity by construction; calls apply_special() internally.
     apply_bakes(s);
 
-    // (3) REMOVED — the char-create class-info-box right-shift + hex-backdrop
-    // stretch splice (cc_box_x_install / cc_box_y_install) is gone. Ephinea does
-    // NOT splice RenderChallengePanelElement and does NOT scale char-create tiles;
-    // its delta is the static design-width widenings + honeycomb frame + right-
-    // gradient widths/colors that now live entirely in kBakes[] (applied above).
+    // (3) Char-create class-info-box + hex-backdrop: positioned entirely by kBakes[]
+    // (applied above), NOT a per-draw splice. Ephinea does NOT splice
+    // RenderChallengePanelElement and does NOT scale char-create tiles; its delta is
+    // the static design-width widenings + honeycomb frame + right-gradient
+    // widths/colors.
 
     // (4) psobb.io patch-server news/status screen (Trinity AdDrawLineTask
     // @0x00408C9D): right/bottom-anchor the MOTD box geometry.
-    // [RESTORED 2026-06-22 — full overnight revert after the prune broke the front-end.]
     patch_ad_draw_line(s);
 
     // (Char-create class-select layout is an authoritative-source bake now —
@@ -4574,40 +3978,6 @@ static void apply_static_patches(const ws_scale_ctx *s)
         log_line("[pso_widescreen] no-vignette: %d sites patched (719B54/733BA7/733A0E)", n);
     }
 
-    // ---- CONNECT-FIX (RE: _re/connect_fix_deterministic.md) ----------------
-    // The IME / keyboard-layout routine sub_00841330 does a
-    //   0x00841384:  ff 15 9c c3 8e 00   call dword [0x008EC39C]
-    // but 0x008EC39C is a DEAD .data dword baked on disk to the literal
-    // 0xFFFFFC45 — nothing in the image ever writes a real pointer into it
-    // (verified: 0 matches for any mov-to-0x8EC39C). So the call jumps to
-    // 0xFFFFFC45 -> AV (the "connect crash"; the network/ws2 labels on the old
-    // pso_connect_fix_dyn.ps1 watcher were MISLABELED — this is an IME path).
-    // The slot is MEANT to hold user32!GetKeyboardLayout; the valid bound IAT
-    // thunk for it is 0x008F83A8, and the THREE sibling GetKeyboardLayout(0)
-    // sites (0x00840127-region / 0x0084152E / 0x0084179A) already call it
-    // correctly. Fix = repoint this one call to the live IAT thunk:
-    //   0x00841384:  ff 15 9c c3 8e 00 (call [0x008EC39C], broken)
-    //             -> ff 15 a8 83 8f 00 (call [0x008F83A8], the IAT thunk)
-    // Write only the 4-byte absolute-operand field at 0x00841386
-    // (9c c3 8e 00 -> a8 83 8f 00); the ff 15 opcode is unchanged.
-    // Race-free: the IAT thunk is loader-bound before the EXE entry runs, so
-    // 0x008F83A8 is always a valid user32 pointer — no copy to go stale, no
-    // poll, no reapply. patch_write flushes the icache (.text VA). Retires
-    // pso_connect_fix_dyn.ps1. DO NOT touch 0x00841327 (the watcher's "Patch 2"
-    // CALL) — sub_00841330 is SEH-wrapped and repointing that site is unsafe.
-    if (g_cfg.connect_fix) {
-        static const uint8_t k_iat_op[4] = { 0xA8, 0x83, 0x8F, 0x00 };  // LE 0x008F83A8
-        __try {
-            const volatile uint8_t *p = (const volatile uint8_t *)0x00841384u;
-            // Guard the FULL broken instruction signature before touching the operand.
-            if (p[0] == 0xFF && p[1] == 0x15 &&
-                p[2] == 0x9C && p[3] == 0xC3 && p[4] == 0x8E && p[5] == 0x00) {
-                if (patch_write(0x00841386u, k_iat_op, 4, "connect-fix 841386"))
-                    log_line("[pso_widescreen] connect-fix: IME call 0x00841384 repointed to GetKeyboardLayout IAT");
-            }
-            // else: already patched (ff 15 a8 83 8f 00) or a non-matching build -> no-op.
-        } __except (EXCEPTION_EXECUTE_HANDLER) { }
-    }
 }
 
 // ---- In-game scale + hook primitives ----------------------------------
@@ -4774,34 +4144,19 @@ static void ingame_reassert_on_transition(void)
 // MinHook). Mechanism-classified, NOT by any anzz1/sodaboy label.
 static void apply_engine_patches(const ws_scale_ctx *s)
 {
-    (void)s;  // reads g_cfg.hud_scale/hud_compress live inside the installers
-    // Cursor-warp fix: keep the OS pointer on the DRAWN menu element under HUD
-    // scale. IAT-hooks SetCursorPos. Identity no-op when both knobs are 1.0.
-    install_cursor_warp_fix();
+    (void)s;  // reads g_cfg.hud_scale live inside the installers
     // Char-select 3D model pan: E8 redirect of the scene's ResetNPCCamera call.
     // World-space; survives PatchCharSelect=0 (orthogonal to the 2D layout).
     patch_charselect_model_pan();
     // Over-head player name-label scaler (Ephinea FUN_52dc4f60 port): E8 redirect
     // of the name-tag draw call @0x0078A300. No-op at 4:3; name-tags only.
     patch_name_label_scaler();
-    // Char-create class-select layout: AUTHORITATIVE-SOURCE bake .
-    // The two render-thread MinHooks (composer 0x0082BB74 + info-text 0x0082B440)
-    // and their leaking negative gate are DELETED; every char-create content
-    // element is now relocated at its TRUE static source (2 .text scene-init bake
-    // immediates + 2 .rdata portrait floats), value-guarded so 4:3 is a byte-
-    // identical no-op.
-    //
-    // NOTE startup-bake consolidation): the 4 STATIC char-create writes
-    // are no longer poked from here — they were folded into apply_startup_bakes(),
-    // which runs from apply_static_patches immediately after apply_anzz1_widescreen
-    // (also after anzz1 owns design_w).
-    //
-    // NO per-frame char-create patching. The former per-frame
-    // content-stride composer hook (cc_quad_fix_c @0x0082BB74) was DELETED per the
-    // owner's no-per-frame-patching mandate; 0x0082BB74 is byte-stock. Char-create
-    // is owned entirely by the static apply_startup_bakes() pass + stock geometry.
-    // The class-select right-pane CONTENT rows are runtime-only widget data with no
-    // static source, so they are intentionally not strided (no allowed mechanism).
+    // Char-create needs no code-flow detour here: it is owned entirely by the static
+    // apply_startup_bakes() pass (run from apply_static_patches, right after
+    // apply_anzz1_widescreen) plus stock geometry — no per-frame hook (0x0082BB74 /
+    // 0x0082B440 are byte-stock). The class-select right-pane CONTENT rows are
+    // runtime-only widget data with no static source, so they are intentionally not
+    // strided.
 }
 
 // ---- Entry ----
@@ -4853,6 +4208,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         // switch, same as the boot poster. VideoEnable=0 (default) =>
         // mod_video_init early-returns dormant and on_present is a no-op.
         mod_video_init(g_cfg.video_path,
+                       g_cfg.video_boot_path,
                        g_cfg.video_enabled,
                        g_cfg.video_skippable,
                        g_cfg.video_ffmpeg,

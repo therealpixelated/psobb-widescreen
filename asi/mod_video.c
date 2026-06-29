@@ -87,6 +87,11 @@
 
 #include <MinHook.h>          // CHARCREATE source-event detour on 0x007A60DC.
 
+// stb_image DECLARATIONS only (the IMPLEMENTATION lives in mod_boot_poster.c,
+// same build/link). The boot-cover still loads patches/psobb_boot_poster.png
+// via stbi_load + an RGBA->BGRA swizzle, mirroring bp_decode_png.
+#include "stb_image.h"
+
 #include "mod_video.h"
 
 // ---- In-process Windows Media Foundation decode (VID_DECODER_MF, default) ----
@@ -237,10 +242,7 @@ typedef HRESULT (STDMETHODCALLTYPE *GetBackBuffer_t)(
 typedef HRESULT (STDMETHODCALLTYPE *Surf_GetDesc_t)(
     IDirect3DSurface8 *self, D3DSURFACE_DESC8_X *pDesc);
 
-// (The CopyRects SYSTEMMEM->backbuffer blit path and its CreateImageSurface /
-//  CopyRects / Surf_LockRect / Surf_UnlockRect ABI typedefs were REMOVED 2026-06-17:
-//  it was abandoned under dgVoodoo2 and had zero call sites. GetBackBuffer (slot 16)
-//  is retained above — vid_query_backbuffer still uses it to read the real
+// (GetBackBuffer (slot 16) above is used by vid_query_backbuffer to read the real
 //  backbuffer W/H/Format.)
 
 #ifndef D3DFMT_X8R8G8B8
@@ -365,11 +367,39 @@ typedef HRESULT (STDMETHODCALLTYPE *GetVertexShader_t)(
 
 // ---- Tunables ----
 #define VID_RING_SLOTS     3        // spec: 3-slot ring
-// BOOT-trigger warm-up: how many Presents after a device appears before the
-// BOOT clip starts. A tiny delay lets the wrapper settle the swap chain before
-// we hammer it with a fullscreen quad. (Unused by the CHARCREATE trigger, which
-// starts off the live scene gate's rising edge, not a present count.)
+// BOOT-trigger warm-up: minimum Presents after a device appears before we even
+// begin testing the start gate. A tiny delay lets the wrapper settle the swap
+// chain before we hammer it with a fullscreen quad. (Unused by the CHARCREATE
+// trigger, which starts off the live scene gate's rising edge, not a count.)
 #define VID_START_AFTER_PRESENTS 8
+// BOOT start: after the warm-up, hold the meteor a fixed wall-clock delay so the
+// wide-cover boot poster (mod_boot_poster.c) gets a visible splash window first,
+// then hand off. Wall-clock, NOT a present count and NOT the engine's "NOW
+// LOADING done" signal (which on a heavy mod stack runs ~30s) -- so it lands at
+// the same ~4s on every machine.
+#define VID_BOOT_POSTER_MS 4000
+// Absolute fallback: if the cover never becomes visible (device never goes
+// texture-able), start the meteor anyway this long after the first present so the
+// boot can't stall on a black screen forever.
+#define VID_BOOT_HARD_CAP_MS 12000
+
+// ---- BOOT COVER still image (the meteor's pre-roll splash) ----
+// Replaces the separate mod_boot_poster.c draw: the boot leg shows
+// patches/psobb_boot_poster.png fullscreen (through vid_draw_overlay's state
+// capture/restore) opaque for VID_COVER_HOLD_MS, then ramps its diffuse alpha
+// 255->0 over VID_COVER_FADE_MS (fades to the overlay's black underlay), then
+// starts the meteor. A skip during the opaque hold jumps straight to the fade.
+#define VID_COVER_HOLD_MS  3500     // opaque hold before the fade
+#define VID_COVER_FADE_MS  600      // cover fade-out (alpha 255->0)
+#define VID_COVER_MAX_DIM  1280     // texture-dim cap (== bp's BP_MAX_TEX_DIM)
+// Meteor fade-IN (boot leg only): when the meteor starts, ramp its quad's diffuse
+// alpha 0->255 over this window so it dissolves up from black (no hard cut). The
+// char-create intros leg keeps a constant 0xFFFFFFFF diffuse (no fade).
+#define VID_METEOR_FADEIN_MS 600
+
+// Implemented in mod_boot_poster.c: force-disable the poster when the meteor takes
+// over (kept; the cover path now lives here, so we still disable the legacy poster).
+extern void boot_poster_force_disable(void);
 
 // HARD startup grace (ms) before any skip is honored. The Enter that confirmed
 // the "create new Play Character? YES/NO" dialog is still down (and bounces) at
@@ -397,9 +427,23 @@ typedef struct {
     int   diag;                    // VideoDiag (1 = draw a single RED half-width
                                    //   untextured quad instead of the video, to
                                    //   isolate draw+diffuse from texture sampling)
-    char  path[MAX_PATH];          // resolved (absolute) source path
+    char  path[MAX_PATH];          // resolved (absolute) ACTIVE source path (what
+                                   //   the next vid_start decodes). For trigger=
+                                   //   both this is boot_path during the boot leg
+                                   //   and char_path after the boot leg ends.
     char  ffmpeg[MAX_PATH];        // resolved ffmpeg.exe path (or "ffmpeg")
     char  wav[MAX_PATH];           // sibling "<path>.wav" if audio==1
+
+    // ---- VID_TRIGGER_BOTH: the two source paths + leg tracking ----
+    // For trigger=both ONE instance plays boot_path at boot, then char_path at
+    // char-create. `path` (above) is swapped between them as the active source.
+    // For trigger=boot/charcreate, char_path mirrors `path` and boot_path is "".
+    char  char_path[MAX_PATH];     // the CHAR-CREATE leg source (VideoPath)
+    char  boot_path[MAX_PATH];     // the BOOT leg source (VideoBootPath; both-only)
+    int   boot_leg_started;        // 1 once the both-mode boot leg actually began
+                                   //   playing (so we can detect its end)
+    int   boot_leg_done;           // 1 once the boot leg (both-mode) has ended and
+                                   //   the active path was switched to char_path
 
     int   init_done;
     int   disabled_perm;           // 1 = never try again
@@ -414,6 +458,24 @@ typedef struct {
     // ---- boot trigger (mode==BOOT): one-shot present-count start ----
     int   start_requested;         // 1 until we've kicked playback once
     LONG  present_seen;            // present count since a valid device
+    DWORD boot_first_ms;           // GetTickCount() at the boot leg's first present
+
+    // ---- BOOT COVER still (the meteor pre-roll splash) ----
+    // Lifecycle: 0=not started, 1=loading/loaded, 2=opaque hold, 3=fading,
+    // 4=done (meteor may start). Owns the boot-leg timing now (the meteor starts
+    // when the still's fade completes, replacing the boot_poster_shown_ms gate).
+    int   cover_phase;             // 0 idle, 1 loaded, 2 hold, 3 fade, 4 done
+    int   cover_load_tried;        // 1 once we've attempted the PNG load (success or fail)
+    int   cover_ok;                // 1 if the cover texture is uploaded + drawable
+    int   cover_w, cover_h;        // cover image dims (possibly downscaled)
+    unsigned char *cover_rgba;     // BGRA pixels (freed after upload)
+    IDirect3DTexture8 *cover_tex;  // cover texture (A8R8G8B8 managed)
+    DWORD cover_phase_ms;          // GetTickCount() when the current phase began
+    int   cover_skip_seen_up;      // skip-edge debounce: both keys seen UP once
+    int   cover_skip_prev_down;    // prev Enter|Esc down-state (edge detect)
+
+    // ---- meteor fade-IN (boot leg only) ----
+    DWORD meteor_fadein_ms;        // GetTickCount() at meteor start; 0 = no fade-in
 
     // ---- char-create trigger (mode==CHARCREATE): SOURCE-EVENT driven ----
     // No scene-id poll. The transition-request setter sub_007A60DC @0x007A60DC
@@ -435,6 +497,9 @@ typedef struct {
                                    // Our XAudio2 video audio is a separate device/
                                    // session, never on the engine audio path.
     volatile LONG stop_requested;  // one-shot: cc_on_request asks Present to tear down
+    volatile LONG cc_exit_armed;   // one-shot: at video EOF/skip the owned scene-3 frame
+                                   //   RETURNS THROUGH the real 0x007C1588 (no replica
+                                   //   request(5)); consumed in cc_scene3_owned_frame.
 
     // ---- playback session ----
     volatile LONG playing;         // 1 while a session is live
@@ -478,6 +543,11 @@ typedef struct {
     // in-flight PCM block FIFO (submitted buffers we must free after the voice
     // consumes them). Sized so we never block the reader; reaped each loop.
     #define VID_AUDIO_QMAX 64
+    // Cushion the reader keeps queued AHEAD of the voice (< QMAX so we never overfill
+    // -> never drop). ~32 PCM buffers (~0.6-1.3s) ride out slow video frames so the
+    // XAudio2 voice never underruns — the audio-crackle fix. The reader tops the FIFO
+    // up to this, then reads paced video.
+    #define VID_AUDIO_TARGET 32
     BYTE  *audio_q[VID_AUDIO_QMAX];
     LONG   audio_q_head, audio_q_tail;   // ring indices (head=submit, tail=reap)
 #endif
@@ -493,6 +563,11 @@ typedef struct {
     int   skip_armed;              // becomes 1 once both keys seen UP + delay
     int   keys_seen_up;            // both VK_RETURN and VK_ESCAPE were UP once
     int   skip_prev_down;          // prev Enter|Esc down-state (edge detect)
+    int   skip_draining;           // BOOT-leg only: a skip fired but the skip key is
+                                   // still physically DOWN. Keep the cover up (redraw
+                                   // last frame) until BOTH VK_RETURN and VK_ESCAPE
+                                   // read UP, THEN teardown — so the revealed title
+                                   // doesn't poll the held Enter and pop its menu.
 
     // ---- D3D resources ----
     IDirect3DTexture8 *texture;
@@ -522,6 +597,9 @@ static const DWORD VID_SAVED_RS[] = {
     D3DRS_STENCILENABLE, D3DRS_CULLMODE, D3DRS_CLIPPING, D3DRS_COLORVERTEX,
     D3DRS_ALPHATESTENABLE, D3DRS_SHADEMODE, D3DRS_TEXTUREFACTOR,
     D3DRS_DIFFUSEMATERIALSOURCE, D3DRS_ALPHABLENDENABLE,
+    // The blend path (cover fade / meteor fade-in) also writes these; save them so
+    // the manual-fallback restore can't leak them into the engine's next frame.
+    D3DRS_SRCBLEND, D3DRS_DESTBLEND, D3DRS_BLENDOP,
 };
 #define VID_NUM_SAVED_RS (sizeof(VID_SAVED_RS)/sizeof(VID_SAVED_RS[0]))
 
@@ -529,7 +607,7 @@ static const DWORD VID_SAVED_RS[] = {
 // BOTH the textured and untextured paths (their union).
 static const DWORD VID_SAVED_TSS0[] = {
     D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_COLORARG2,
-    D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1,
+    D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2,
     D3DTSS_MAGFILTER, D3DTSS_MINFILTER, D3DTSS_MIPFILTER,
     D3DTSS_ADDRESSU, D3DTSS_ADDRESSV, D3DTSS_TEXCOORDINDEX,
 };
@@ -603,9 +681,7 @@ static int vid_file_exists(const char *path)
 // EVERY scene transition flows through. We MinHook it and read ONLY its single
 // __cdecl arg (`int target` = the scene the engine is about to switch to). We
 // NEVER read the current-scene global 0x00AAB384, the (mis-named) 0x00A3A93C
-// game-list buffer, or the player array for the CHARCREATE trigger. The old
-// per-frame scene poll (vid_cc_gate + the rising/falling-edge tracking in
-// vid_present_body) is DELETED.
+// game-list buffer, or the player array for the CHARCREATE trigger.
 //
 // ENTRY/EXIT logic (the doc's OWNERSHIP MODEL 2026-06-11: cover scene-3 ONLY):
 //   target == 3                          -> cc_session=1; start the cover.
@@ -653,6 +729,16 @@ static void cc_audio_disarm(void);
 static int adiag_scene(void);
 static volatile LONG adiag_cc(void);
 
+// Does this trigger drive the CHAR-CREATE leg (the request(3) ownership cover)?
+// True for CHARCREATE and for BOTH (whose char leg is identical to CHARCREATE).
+// The BOOT one-shot leg of BOTH is a SEPARATE path that never sets cc_session, so
+// the ownership writes here are reached ONLY via request(3) — never by the boot leg.
+static int cc_is_charcreate_trigger(void)
+{
+    return g_video.trigger == VID_TRIGGER_CHARCREATE ||
+           g_video.trigger == VID_TRIGGER_BOTH;
+}
+
 static void __cdecl cc_on_request(int target)
 {
     // DIAG: log EVERY transition request (before any trigger gate) so the real
@@ -664,15 +750,27 @@ static void __cdecl cc_on_request(int target)
              target, adiag_scene(),
              (long)InterlockedCompareExchange(&g_video.cc_session, 0, 0));
 
-    if (g_video.trigger != VID_TRIGGER_CHARCREATE) return;
+    if (!cc_is_charcreate_trigger()) return;
 
     if (target == 3) {                                  // ENTRY: scripted intro
         // The scene-3 ownership hook is already installed (eagerly at init) as a
         // passthrough; setting cc_session here flips it into the replica BEFORE the
         // pump dispatches scene-3 (we run inside the request setter, ahead of the
         // transition commit). Then arm the audio mute + ask Present to start.
+        // BOTH mode: ensure the active source is the CHAR-CREATE path before we
+        // kick the char leg. The boot-leg teardown normally already switched it
+        // (boot_leg_done), but if request(3) somehow arrives while the boot leg is
+        // still the active path (e.g. boot leg never ran), force the swap here so
+        // the char leg never accidentally re-decodes the boot video. char_path is
+        // mirrored to `path` for boot/charcreate triggers, so this is a no-op there.
+        if (g_video.char_path[0])
+            _snprintf_s(g_video.path, sizeof(g_video.path), _TRUNCATE,
+                        "%s", g_video.char_path);
+        g_video.boot_leg_done = 1;                      // the char leg owns playback now
         InterlockedExchange(&g_video.cc_session, 1);    // the replica now owns scene-3
-        cc_audio_arm();                                 // Option K: SOUNDCTRL save+zero
+        // (No audio mute on char-create: the intro ADX is prevented at its SOURCE by
+        //  the play_bgm 0x00814AFC cc_session gate — no SOUNDCTRL zeroing, so engine
+        //  audio is untouched and there is no "BGM gone after skip". 2026-06-28.)
         g_video.start_requested = 1;                    // Present body kicks vid_start
     } else if (InterlockedCompareExchange(&g_video.cc_session, 0, 0)) {
         if (target == 5 || target == 0 || target == 2 || target == 0xB) {
@@ -829,9 +927,11 @@ typedef void (__cdecl *cc_stop_all_audio_fn_t)(void);
 // Stop the engine BGM player pool (the only lever that silences the streamed ADX
 // intro). SEH-guarded; safe to call repeatedly (idempotent reset of already-stopped
 // players). Trigger-gated so a non-charcreate build never calls into engine audio.
+// (BOTH counts as charcreate-capable; this only ever runs from the cc_session-set
+// owned-frame replica, so the boot leg — which never sets cc_session — never reaches it.)
 static void cc_audio_kill_bgm(void)
 {
-    if (g_video.trigger != VID_TRIGGER_CHARCREATE) return;
+    if (!cc_is_charcreate_trigger()) return;
     __try {
         cc_stop_all_audio_fn_t stop_all =
             (cc_stop_all_audio_fn_t)(uintptr_t)CC_STOP_ALL_AUDIO_VA;
@@ -852,7 +952,7 @@ static void cc_audio_kill_bgm(void)
 // BGM still ringing out from char-select at request(3) time.
 static void cc_audio_arm(void)
 {
-    if (g_video.trigger != VID_TRIGGER_CHARCREATE) return;     // only for the cover
+    if (!cc_is_charcreate_trigger()) return;                   // only for the cover (incl. BOTH char leg)
     if (InterlockedCompareExchange(&g_soundctrl_armed, 1, 0) != 0) return; // already armed
     cc_audio_kill_bgm();   // (1) stop BGM pool BEFORE zeroing SOUNDCTRL (which would gate it out)
     __try {
@@ -890,6 +990,154 @@ static void cc_audio_disarm(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("[video] SOUNDCTRL disarm SEH (restore skipped)");
     }
+}
+
+// ---- INTRO-BGM PREVENTION: the "no mute" replacement for char-create ----------
+// Owner directive 2026-06-28: "you shouldn't NEED to mute anything if you insert the
+// video as a proper frame." So instead of zeroing SOUNDCTRL / per-frame StopAllAudio
+// to silence the intro ADX UNDER the video, PREVENT it from starting at its source.
+// The intro CUBE_OPENING.adx is started by play_bgm (void __cdecl, byte* filename) at
+// 0x00814AFC (chain: scene-3 entry ctor 0x007C1714 -> 0x007C16D4 -> 0x0070F41C ->
+// 0x0070F50C -> call 0x00814AFC), which runs AFTER request(3) sets cc_session. We
+// MinHook play_bgm: while cc_session owns scene-3 the detour RETURNS WITHOUT starting
+// any BGM; otherwise it passes through to the real player. cc_session is the sole gate
+// (no scene-id read) and the cover is the only window we want zero engine BGM, so it is
+// surgical + reversible. __cdecl -> a plain C detour cleans the stack on the skip path.
+#define CC_PLAY_BGM_VA   0x00814AFCu   // void __cdecl play_bgm(byte *filename)
+typedef void (__cdecl *cc_play_bgm_fn_t)(const void *filename);
+static LPVOID g_tramp_814afc = NULL;
+static int    g_play_bgm_hook_installed = 0;
+
+static void __cdecl cc_play_bgm_detour(const void *filename)
+{
+    if (InterlockedCompareExchange(&g_video.cc_session, 0, 0)) return;  // cover up -> no BGM
+    if (g_tramp_814afc) ((cc_play_bgm_fn_t)g_tramp_814afc)(filename);   // else pass through
+}
+
+static int cc_play_bgm_hook_install(void)
+{
+    if (g_play_bgm_hook_installed) return 1;
+    MH_STATUS rc = MH_Initialize();
+    if (rc != MH_OK && rc != MH_ERROR_ALREADY_INITIALIZED) {
+        log_line("[video] play_bgm MH_Initialize failed rc=%d", (int)rc);
+        return 0;
+    }
+    rc = MH_CreateHook((LPVOID)(uintptr_t)CC_PLAY_BGM_VA,
+                       (LPVOID)cc_play_bgm_detour, &g_tramp_814afc);
+    if (rc != MH_OK) {
+        log_line("[video] play_bgm MH_CreateHook(0x%08x) failed rc=%d",
+                 CC_PLAY_BGM_VA, (int)rc);
+        return 0;
+    }
+    rc = MH_EnableHook((LPVOID)(uintptr_t)CC_PLAY_BGM_VA);
+    if (rc != MH_OK) {
+        log_line("[video] play_bgm MH_EnableHook failed rc=%d", (int)rc);
+        return 0;
+    }
+    g_play_bgm_hook_installed = 1;
+    log_line("[video] intro-BGM-prevent hook installed @0x%08x tramp=%p",
+             CC_PLAY_BGM_VA, g_tramp_814afc);
+    return 1;
+}
+
+static void cc_play_bgm_hook_uninstall(void)
+{
+    if (!g_play_bgm_hook_installed) return;
+    MH_DisableHook((LPVOID)(uintptr_t)CC_PLAY_BGM_VA);
+    MH_RemoveHook((LPVOID)(uintptr_t)CC_PLAY_BGM_VA);
+    g_play_bgm_hook_installed = 0;
+    g_tramp_814afc = NULL;
+}
+
+// ---- BOOT TITLE-DEFER: the boot leg's "video as a proper frame" --------------
+// Owner directive 2026-06-28: the boot video must play FIRST, THEN the title fades
+// in. Today the title (scene 1) builds UNDER the video overlay: its objects are made
+// in .init 0x007A45D0 and its .update 0x007A4418 fires a one-shot fade-in + BGM on
+// the first call after the build — all consumed invisibly under the cover, so EOF
+// hardcuts to an already-built, muted title.
+//
+// FIX (no manual frame-driving — the engine keeps driving its own loop):
+//   .init (0x007A45D0): while the boot leg is live, DEFER (return without building).
+//       The scene loop leaves current_scene_type==0 and proceeds to .update.
+//   .update (0x007A4418): while deferred + video not done, run the REAL update — it
+//       renders the EMPTY title container (nothing) + Present, so the video overlay
+//       shows. The instant the boot leg ends (boot_leg_done), call the real .init
+//       ONCE to build the title, then the real update — its first call fires the
+//       fade-in + BGM with audio on. Subsequent title entries (boot_leg_done already
+//       set, or non-boot trigger) are byte-identical passthrough.
+// No-arg scene handlers -> __cdecl/stdcall are identical (no stack args), so plain C
+// detours are ABI-clean. Live-confirmed: .init=0x007A45D0, .update=0x007A4418 (its
+// sibling .update matches SinowberillScene_Update_007a4418 in the decompile).
+#define BOOT_TITLE_INIT_VA    0x007A45D0u   // scene_handlers[1].init
+#define BOOT_TITLE_UPDATE_VA  0x007A4418u   // scene_handlers[1].update
+
+static LPVOID g_tramp_title_init   = NULL;
+static LPVOID g_tramp_title_update = NULL;
+static int    g_boot_title_hook_installed = 0;
+static volatile LONG g_boot_title_deferred = 0;
+
+static void __cdecl boot_title_init_detour(void)
+{
+    // Defer the build while the boot leg is live (boot video not yet done).
+    if ((g_video.trigger == VID_TRIGGER_BOOT || g_video.trigger == VID_TRIGGER_BOTH)
+        && !g_video.boot_leg_done) {
+        InterlockedExchange(&g_boot_title_deferred, 1);
+        return;   // DEFER — do not build the title yet (current_scene_type stays 0)
+    }
+    if (g_tramp_title_init) ((void (__cdecl *)(void))g_tramp_title_init)();
+}
+
+static void __cdecl boot_title_update_detour(void)
+{
+    if (InterlockedCompareExchange(&g_boot_title_deferred, 0, 0)) {
+        if (g_video.boot_leg_done) {
+            // Boot video finished -> build the title NOW so the real update below is
+            // its FIRST update and fires the fade-in + BGM with audio on.
+            if (g_tramp_title_init) ((void (__cdecl *)(void))g_tramp_title_init)();
+            InterlockedExchange(&g_boot_title_deferred, 0);
+        }
+        // else: video still playing -> the real update below renders the empty title
+        //       container + Present so the overlay shows; nothing else is built.
+    }
+    if (g_tramp_title_update) ((void (__cdecl *)(void))g_tramp_title_update)();
+}
+
+static int boot_title_hook_install(void)
+{
+    if (g_boot_title_hook_installed) return 1;
+    MH_STATUS rc = MH_Initialize();
+    if (rc != MH_OK && rc != MH_ERROR_ALREADY_INITIALIZED) {
+        log_line("[video] boot-title MH_Initialize failed rc=%d", (int)rc);
+        return 0;
+    }
+    if (MH_CreateHook((LPVOID)(uintptr_t)BOOT_TITLE_INIT_VA,
+                      (LPVOID)boot_title_init_detour, &g_tramp_title_init) != MH_OK) {
+        log_line("[video] boot-title .init hook create failed"); return 0;
+    }
+    if (MH_CreateHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA,
+                      (LPVOID)boot_title_update_detour, &g_tramp_title_update) != MH_OK) {
+        log_line("[video] boot-title .update hook create failed"); return 0;
+    }
+    if (MH_EnableHook((LPVOID)(uintptr_t)BOOT_TITLE_INIT_VA) != MH_OK ||
+        MH_EnableHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA) != MH_OK) {
+        log_line("[video] boot-title MH_EnableHook failed"); return 0;
+    }
+    g_boot_title_hook_installed = 1;
+    log_line("[video] boot title-defer hooks installed (.init=0x%08x .update=0x%08x)",
+             BOOT_TITLE_INIT_VA, BOOT_TITLE_UPDATE_VA);
+    return 1;
+}
+
+static void boot_title_hook_uninstall(void)
+{
+    if (!g_boot_title_hook_installed) return;
+    MH_DisableHook((LPVOID)(uintptr_t)BOOT_TITLE_INIT_VA);
+    MH_DisableHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA);
+    MH_RemoveHook((LPVOID)(uintptr_t)BOOT_TITLE_INIT_VA);
+    MH_RemoveHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA);
+    g_boot_title_hook_installed = 0;
+    g_tramp_title_init = NULL;
+    g_tramp_title_update = NULL;
 }
 
 // ---- OWNERSHIP replica: MinHook the scene-3 update 0x007C1588 ----
@@ -1010,6 +1258,19 @@ static void cc_scene3_owned_frame(void)
     cc_void_fn_t    epilogue      = (cc_void_fn_t)(uintptr_t)CC_S3_EPILOGUE;
     cc_request_fn_t request       = (cc_request_fn_t)(uintptr_t)CC_REQUEST_SETTER_CALL;
 
+    // INPUT-LEAK FIX (2026-06-28): DRAIN the front-end keyboard queue every owned
+    // frame. The skip-Enter is BUFFERED in this queue (0x00A9CAA0) and survives the
+    // cover -> class-select reads it right after the 3->5 handoff and auto-picks
+    // Hunter. Waiting for key-release didn't help because the EVENT is buffered, not
+    // the held key (our own RE note). Zeroing the processed-key COUNT at +3 (the same
+    // field agent/kbd_inject increments to INJECT) makes the engine's
+    // ProcessKeyboardInput_0078eedc early-return (num_keys_processed < 1 ->
+    // num_new_keypresses=false), so the next scene sees no buffered keypress. The
+    // mod's own skip read is GetAsyncKeyState (separate), so skip detection is
+    // unaffected. Drains continuously while the cover owns scene-3, so the queue is
+    // empty at the handoff.
+    *(volatile unsigned char *)(uintptr_t)0x00A9CAA3u = 0;  // 0x00A9CAA0+3 = num_keys_processed
+
     // INPUT-LEAK FIX (2026-06-24, disasm-verified on the io client):
     //   The prior replica KEPT the input AGGREGATION 0x007BFBA0 (and the engine
     //   skip read 0x007BFEDC / skip apply 0x007A6174). That was the leak: 0x007BFBA0
@@ -1052,13 +1313,14 @@ static void cc_scene3_owned_frame(void)
     // Stop the BGM pool on EVERY owned frame: idempotent (resets already-stopped
     // players), engine-thread, only runs while the cover is up. This is the lever
     // that actually keeps the intro audio off under the video.
-    cc_audio_kill_bgm();   // KILL 0x00815434 (engine BGM pool stop) — the ADX silence
+    // (No per-frame BGM kill: the intro ADX is now prevented at its SOURCE — the
+    //  play_bgm 0x00814AFC detour returns early while cc_session owns scene-3 — so
+    //  there is nothing to silence and NO mute is needed. 2026-06-28.)
 
     // --- substate state machine (the 3->5 handoff; input-INDEPENDENT) ---
     // We arm 0xAAE988=1 + 0xAAE980=1 at video EOF/skip (cc_arm_engine_exit); on the
-    // next owned frame this fires request(5) -> the engine's natural 3->5 exit. The
-    // request setter + the commit pump in the epilogue touch only scene globals, not
-    // the input object — so this works with the input aggregation dropped above.
+    // next owned frame this fires request(5) -> the engine's natural 3->5 exit. It does
+    // NOT run the input pump, so the skip Enter never cascades into class-select.
     if (*CC_EXIT_FLAG_988_R == 1) {               // sub1: ADX-done / WE armed it
         signed char f980 = (signed char)*CC_EXIT_FLAG_980_R;
         if (f980 == 0) {
@@ -1066,7 +1328,6 @@ static void cc_scene3_owned_frame(void)
         } else if (f980 == 1) {
             request(5);                           // ==1 -> the engine's own 3->5 EXIT
         }
-        // else: fall straight to the epilogue (stock `jmp 0x7C15D0`).
     }
 
     // sub0 tail: the engine skip read 0x007BFEDC + skip apply 0x007A6174 are DROPPED
@@ -1140,12 +1401,7 @@ static void cc_scene3_hook_uninstall(void)
 // adiag_scene()/adiag_cc() are read-only SEH-guarded helpers used by the
 // audio-mute + engine-exit log lines. They install NO hooks and patch NO
 // engine memory — they only READ the scene-id global (for log context) and
-// our own cover-session latch. The Phase-1/Phase-2 audio-emitter taps (the
-// 0x0070F41C ADX MinHook + the 0x00AD98A4 DSPlay COM tap + the play-by-id
-// gate logger) were REMOVED for Phase 4: their purpose (prove the BGM emitter
-// + the SOUNDCTRL lever) is fulfilled by _cc_engine_audio_suppress.md's
-// "PHASE 2 LIVE PROOF", and leaving unconditional MinHooks in the build would
-// break the "VideoTrigger!=charcreate -> byte-identical" discipline.
+// our own cover-session latch.
 //
 // scene-id global 0x00AAB384 is READ ONLY for log context — it is NEVER a
 // discriminator in the cover path (the request `target` arg + the cc_session
@@ -1412,6 +1668,48 @@ static HRESULT mt_get_pair(IMFMediaType *mt, const GUID *key, UINT32 *a, UINT32 
     return hr;
 }
 
+// ---- Embedded-video resources: the compressed clips are RCDATA in this .asi, so
+//      NO loose .mp4 is read at runtime (no temp file, no fallback). ----
+// Resolve `path`'s basename (sans dir + extension, upper-cased) to its RCDATA
+// resource in THIS module; returns a pointer to the in-image bytes (no copy) and
+// the size, or NULL if there is no matching embedded clip.
+static const void *vid_embedded_bytes(const char *path, DWORD *out_size)
+{
+    char name[64];
+    const char *base = path, *p;
+    for (p = path; *p; ++p)
+        if (*p == '\\' || *p == '/') base = p + 1;
+    size_t i = 0;
+    for (; base[i] && base[i] != '.' && i + 1 < sizeof(name); ++i) {
+        char c = base[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        name[i] = c;
+    }
+    name[i] = 0;
+    if (!name[0]) return NULL;
+
+    HMODULE self = NULL;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)(void *)&vid_embedded_bytes, &self) || !self)
+        return NULL;
+    HRSRC res = FindResourceA(self, name, RT_RCDATA);
+    if (!res) return NULL;
+    HGLOBAL hg = LoadResource(self, res);
+    if (!hg) return NULL;
+    const void *bytes = LockResource(hg);
+    DWORD sz = SizeofResource(self, res);
+    if (!bytes || !sz) return NULL;
+    if (out_size) *out_size = sz;
+    return bytes;
+}
+
+static int vid_embedded_exists(const char *path)
+{
+    DWORD sz = 0;
+    return vid_embedded_bytes(path, &sz) != NULL;
+}
+
 // Open + negotiate on the engine thread. POD/pointer-only body inside the SEH
 // firewall (no C++ unwinding objects -> no C2712, per the file's existing
 // pattern). Sets mf_reader/mf_stride/fps/frame_w/frame_h. Returns 1 on success
@@ -1429,9 +1727,12 @@ static int vid_mf_open_inner(int bb_w, int bb_h)
     }
     g_video.mf_started = 1;
 
-    WCHAR wpath[MAX_PATH];
-    if (MultiByteToWideChar(CP_ACP, 0, g_video.path, -1, wpath, MAX_PATH) == 0) {
-        log_line("[video] mf: path widen failed err=%lu", GetLastError());
+    // Play from the EMBEDDED clip bytes: this .asi carries the compressed mp4s as
+    // RCDATA, so there is NO loose .mp4 read at runtime and no temp file.
+    DWORD vsz = 0;
+    const void *vbytes = vid_embedded_bytes(g_video.path, &vsz);
+    if (!vbytes || !vsz) {
+        log_line("[video] mf: no embedded clip for '%s'", g_video.path);
         return 0;
     }
 
@@ -1445,10 +1746,32 @@ static int vid_mf_open_inner(int bb_w, int bb_h)
     }
     IMFAttributes_SetUINT32(attrs, &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
 
-    hr = MFCreateSourceReaderFromURL(wpath, attrs, &g_video.mf_reader);
+    // Wrap the embedded bytes in an HGLOBAL-backed IStream the MF byte stream owns
+    // for the playback (one transient copy, freed when the reader is released).
+    IStream *istream = NULL;
+    IMFByteStream *mfbs = NULL;
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, vsz);
+    void *hgp = hg ? GlobalLock(hg) : NULL;
+    if (hgp) { memcpy(hgp, vbytes, vsz); GlobalUnlock(hg); }
+    if (!hgp || FAILED(CreateStreamOnHGlobal(hg, TRUE, &istream)) || !istream) {
+        if (hg) GlobalFree(hg);
+        IMFAttributes_Release(attrs);
+        log_line("[video] mf: in-memory stream alloc failed (size=%lu)", vsz);
+        return 0;
+    }
+    hr = MFCreateMFByteStreamOnStream(istream, &mfbs);
+    istream->lpVtbl->Release(istream);                 // mfbs holds its own ref
+    if (FAILED(hr) || !mfbs) {
+        IMFAttributes_Release(attrs);
+        log_line("[video] mf: MFCreateMFByteStreamOnStream failed hr=0x%08x", hr);
+        return 0;
+    }
+
+    hr = MFCreateSourceReaderFromByteStream(mfbs, attrs, &g_video.mf_reader);
+    mfbs->lpVtbl->Release(mfbs);                        // reader holds its own ref
     IMFAttributes_Release(attrs);
     if (FAILED(hr) || !g_video.mf_reader) {
-        log_line("[video] mf: CreateSourceReaderFromURL failed hr=0x%08x", hr);
+        log_line("[video] mf: CreateSourceReaderFromByteStream failed hr=0x%08x", hr);
         return 0;
     }
     IMFSourceReader *rdr = g_video.mf_reader;
@@ -1767,33 +2090,62 @@ static DWORD WINAPI vid_mf_reader_thread(LPVOID arg)
     IMFSourceReader *rdr = g_video.mf_reader;
     LONG produced = 0;
     __try {
+        int audio_eof = 0;
         while (InterlockedCompareExchange(&g_video.reader_run, 1, 1) == 1) {
+            // CUSHION ACCOUNTING FIX (2026-06-28): reap consumed PCM EVERY iteration so
+            // audio_q_tail advances as the voice plays and the adepth below stays TRUE.
+            // The no-audio bug: once the cushion filled we read VIDEO (not audio) and so
+            // never reaped -> tail never advanced -> adepth stuck at TARGET -> the reader
+            // stopped topping up -> the voice underran to SILENCE after ~0.7s. Reaping
+            // here every loop keeps adepth accurate so the cushion refills as it drains.
+            if (g_video.audio_mf_ok) vid_audio_mf_reap();
+
+            // STREAM PICK (audio-crackle fix): keep the audio FIFO topped to a cushion
+            // so the XAudio2 voice never underruns at a slow video frame. The old
+            // ANY_STREAM read produced audio at real-time density with NO cushion, so
+            // the voice ran dry whenever a heavy MFCopyImage stalled the feed ->
+            // repeated mini-underruns = crackle. Now: if the cushion is below target,
+            // read the AUDIO stream specifically to top it up; otherwise read VIDEO.
+            // target < QMAX => we never overfill, so we never drop a sample.
+            DWORD pick = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
+            if (g_video.audio_mf_ok && !audio_eof) {
+                LONG adepth = (g_video.audio_q_head - g_video.audio_q_tail
+                               + VID_AUDIO_QMAX) % VID_AUDIO_QMAX;
+                if (adepth < VID_AUDIO_TARGET)
+                    pick = (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM;
+            }
+
+            // VIDEO PACING: the present shows the NEWEST frame, so newest must stay
+            // ~= the audio playback time. If the last produced frame is already >50ms
+            // ahead of the audio clock, nap (and let the cushion top up next loop)
+            // instead of racing more frames into the ring and desyncing.
+            if (pick == (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM &&
+                g_video.audio_started && g_video.qpc_freq && g_video.fps > 0.0) {
+                LARGE_INTEGER now; QueryPerformanceCounter(&now);
+                double play_t  = (double)(now.QuadPart - g_video.qpc_start)
+                                 / (double)g_video.qpc_freq;
+                double frame_t = (double)produced / g_video.fps;
+                if (frame_t - play_t > 0.05) { Sleep(5); continue; }
+            }
+
             DWORD streamIdx = 0, flags = 0; LONGLONG ts = 0;
             IMFSample *sample = NULL;
-            // ANY_STREAM: MF returns video AND audio samples interleaved on ONE
-            // reader; we dispatch by major type below.
-            HRESULT hr = IMFSourceReader_ReadSample(
-                            rdr, (DWORD)MF_SOURCE_READER_ANY_STREAM,
-                            0, &streamIdx, &flags, &ts, &sample);
+            HRESULT hr = IMFSourceReader_ReadSample(rdr, pick, 0,
+                            &streamIdx, &flags, &ts, &sample);
             if (FAILED(hr)) { InterlockedExchange(&g_video.eof, 1); break; }
             if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
                 if (sample) IMFSample_Release(sample);
-                InterlockedExchange(&g_video.eof, 1);
+                if (pick == (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM) {
+                    audio_eof = 1;          // audio track done -> keep draining video
+                    continue;
+                }
+                InterlockedExchange(&g_video.eof, 1);   // video done -> end of clip
                 break;
             }
-            if (!sample) continue;   // stream gap / format change, not EOS
+            if (!sample) continue;          // stream gap / format change, not EOS
 
-            // --- AUDIO stream -> XAudio2 submit (or DROP) ---
-            // Discriminate audio vs video by the sample's stream major type
-            // (captured lazily on first sight). CRITICAL: test stream-is-audio
-            // BEFORE audio_mf_ok. If the audio media-type was set but XAudio2
-            // init later failed (missing xaudio2_9.dll / Windows N / negotiate
-            // fail), the audio stream stays SELECTED and audio samples keep
-            // arriving — they must be DROPPED here, never fall through to the
-            // video ring (where MFCopyImage would blit PCM as pixels -> corrupt
-            // frames + desync). So a clip-with-audio + failed audio degrades to
-            // SILENT video, not corrupt video.
-            if (vid_mf_stream_is_audio(rdr, streamIdx)) {
+            // --- AUDIO stream -> XAudio2 submit ---
+            if (pick == (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM) {
                 if (g_video.audio_mf_ok) {
                     vid_audio_mf_submit(sample);
                     vid_audio_mf_reap();
@@ -1802,7 +2154,7 @@ static DWORD WINAPI vid_mf_reader_thread(LPVOID arg)
                 continue;
             }
 
-            // --- VIDEO stream -> ring (unchanged from here) ---
+            // --- VIDEO stream -> ring ---
             IMFMediaBuffer *buf = NULL;
             if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(sample, &buf)) && buf) {
                 BYTE *p = NULL; DWORD maxlen = 0, curlen = 0;
@@ -2058,6 +2410,7 @@ static void vid_teardown(const char *why)
     // the normal request(5|0|2|0xB) exit; this is the safety net.
     cc_audio_disarm();
 
+    g_video.meteor_fadein_ms = 0;   // any meteor fade-in ends with the session
     g_video.newest_slot  = -1;
     g_video.newest_index = -1;
     g_video.ring_filled  = 0;
@@ -2119,6 +2472,10 @@ static int vid_start(IDirect3DDevice8 *dev, int bb_w, int bb_h)
     g_video.skip_armed     = 0;
     g_video.keys_seen_up   = 0;
     g_video.skip_prev_down = 1;  // assume confirm key still down at start
+    g_video.skip_draining  = 0;  // no skip-key-drain in progress
+    // Default: no meteor fade-in. The BOOT-leg caller sets meteor_fadein_ms right
+    // after this returns; the char-create leg leaves it 0 (intro is never faded in).
+    g_video.meteor_fadein_ms = 0;
 
     // mci sibling-.wav is the FFMPEG fallback only; MF carries embedded audio.
     if (g_video.decoder == VID_DECODER_FFMPEG) vid_audio_start();
@@ -2134,6 +2491,20 @@ static int vid_start(IDirect3DDevice8 *dev, int bb_w, int bb_h)
 
 // ---- skip input (release-then-press debounce) ----
 
+// TRUE iff one of OUR process's windows is the foreground window. The skip read is
+// GetAsyncKeyState (system-wide / focus-independent), so without this gate an
+// Enter/Esc pressed in ANOTHER app — or held from launch while the client sits in
+// the background — would skip the intro. Honour the skip only when the game is
+// actually focused.
+static int vid_app_focused(void)
+{
+    HWND fg = GetForegroundWindow();
+    if (!fg) return 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
 static int vid_skip_pressed(void)
 {
     if (!g_video.skippable) return 0;
@@ -2142,17 +2513,42 @@ static int vid_skip_pressed(void)
     SHORT esc = GetAsyncKeyState(VK_ESCAPE);
     int down = ((ret & 0x8000) != 0) || ((esc & 0x8000) != 0);
 
+    // GetAsyncKeyState is system-wide, so only honor the skip when the game is the
+    // FOREGROUND app — otherwise a key pressed in another window skips the intro.
+    // Keep tracking the key state while unfocused so a press after refocusing still
+    // reads as a clean up->down edge (a key held across the focus change is not a
+    // fresh skip).
+    if (!vid_app_focused()) {
+        g_video.skip_prev_down = down;
+        return 0;
+    }
+
     // Effective startup grace = max(hard floor, configured debounce). The clip
     // MUST be visible this long before ANY skip is honored. Without it the
     // create-confirm Enter (still down at the cc-gate rising edge) tore the
     // clip down before a single frame showed.
+    //
+    // BOOT LEG ONLY (2026-06-28): zero the grace. The grace exists for the
+    // char-create dialog-bounce (the YES/NO confirm Enter is still down when the
+    // char-create clip starts); the BOOT meteor has no such dialog, so the grace
+    // just swallowed the user's natural eager Enter right when the meteor starts,
+    // forcing a SECOND press. With grace=0 a single fresh focus-gated Enter/Esc
+    // skips the meteor immediately. The release-then-press debounce below is KEPT
+    // for both legs — that is what correctly stops a still-held cover-skip Enter
+    // from also skipping the meteor (preserving the intended two-press behavior
+    // when you DO skip the cover). cc_session==0 == the boot leg (the char-create
+    // leg sets cc_session; see cc_on_request).
+    int boot_leg = (InterlockedCompareExchange(&g_video.cc_session, 0, 0) == 0);
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     double elapsed_ms = 0.0;
     if (g_video.qpc_freq)
         elapsed_ms = (double)(now.QuadPart - g_video.qpc_start) * 1000.0
                      / (double)g_video.qpc_freq;
-    double grace = (double)g_video.skip_debounce_ms;
-    if (grace < (double)VID_SKIP_GRACE_MS) grace = (double)VID_SKIP_GRACE_MS;
+    double grace = 0.0;
+    if (!boot_leg) {
+        grace = (double)g_video.skip_debounce_ms;
+        if (grace < (double)VID_SKIP_GRACE_MS) grace = (double)VID_SKIP_GRACE_MS;
+    }
 
     if (elapsed_ms < grace) {
         // Inside the grace window: never skip. Track the key state so the
@@ -2176,10 +2572,20 @@ static int vid_skip_pressed(void)
     return edge ? 1 : 0;
 }
 
+// TRUE iff BOTH skip keys (Enter and Esc) are currently physically UP. Used by the
+// BOOT-leg skip-drain: after a skip fires we keep the cover up until this reads TRUE
+// so the revealed title never sees the still-held Enter as a fresh menu-open press.
+static int vid_skip_keys_up(void)
+{
+    SHORT ret = GetAsyncKeyState(VK_RETURN);
+    SHORT esc = GetAsyncKeyState(VK_ESCAPE);
+    return ((ret & 0x8000) == 0) && ((esc & 0x8000) == 0);
+}
+
 // ESC -> back-to-char-select poll lives in pso_widescreen.c (cc_esc_back_tick),
 // driven from the always-on Hook_Present so it runs regardless of VideoEnable.
-// It is gated solely on the engine's current-scene global [0x00AAB384]==5, so it
-// no longer needs mod_video's cc_session window or cc_scene_active().
+// It is gated solely on the engine's current-scene global [0x00AAB384]==5,
+// independent of mod_video's cc_session window.
 
 // ---- texture upload of one frame slot ----
 
@@ -2291,13 +2697,20 @@ static int vid_upload_frame(IDirect3DDevice8 *dev, LONG slot, LONG index)
 
 // ---- quad blit (mirror of boot_poster's bp_render_quad) ----
 
-// Two callers: the opaque-BLACK fullscreen underlay (textured=0, diffuse=
-// 0xFF000000) and the aspect-fit textured video quad (textured=1, diffuse=
-// 0xFFFFFFFF). The untextured underlay draws its colour from the per-vertex
-// DIFFUSE (D3DTA_DIFFUSE); the textured quad MODULATEs texture*white==texture.
+// Callers: the opaque-BLACK fullscreen underlay (textured=0, diffuse=0xFF000000),
+// the aspect-fit textured video quad (textured=1, blend=0, diffuse=0xFFFFFFFF), and
+// the boot-cover / meteor-fade quad (textured=1, blend=1, diffuse alpha < 0xFF).
+//   `tex`   = the texture to bind for the textured path (g_video.texture for the
+//             video, cover_tex for the cover; ignored when !textured).
+//   `blend` = 1 -> ALPHABLENDENABLE on (SRCALPHA/INVSRCALPHA) and the texture's
+//             ALPHAOP MODULATEs texture.a * diffuse.a, so the per-vertex diffuse
+//             ALPHA fades the whole quad over the black underlay (the cover fade-
+//             out + the meteor fade-in). 0 -> opaque (the original video path).
+// The untextured underlay draws its colour from the per-vertex DIFFUSE.
 static void vid_render_quad(IDirect3DDevice8 *dev,
                             float x1, float y1, float x2, float y2,
-                            int textured, DWORD diffuse)
+                            int textured, DWORD diffuse,
+                            IDirect3DTexture8 *tex, int blend)
 {
     void **vt = *(void ***)dev;
     SetTexture_t           fnSetTexture           = (SetTexture_t)vt[61];
@@ -2325,9 +2738,17 @@ static void vid_render_quad(IDirect3DDevice8 *dev,
     // For XYZRHW geometry the material/diffuse source is moot (pre-lit), but
     // make the intent explicit: diffuse comes from the vertex color (source 1).
     fnSetRenderState(dev, D3DRS_DIFFUSEMATERIALSOURCE, 1);
-    // Opaque: blend OFF. The black underlay is the letterbox; the video is
-    // fully opaque (alpha from BGRA is 0xFF from ffmpeg rawvideo anyway).
-    fnSetRenderState(dev, D3DRS_ALPHABLENDENABLE, 0);
+    // blend=1 (cover fade / meteor fade-in): alpha-blend over the black underlay so
+    // a diffuse alpha < 0xFF dissolves the quad to black. blend=0: opaque (original
+    // video path; BGRA alpha is 0xFF anyway).
+    if (blend) {
+        fnSetRenderState(dev, D3DRS_ALPHABLENDENABLE, 1);
+        fnSetRenderState(dev, D3DRS_SRCBLEND,  D3DBLEND_SRCALPHA);
+        fnSetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        fnSetRenderState(dev, D3DRS_BLENDOP,   D3DBLENDOP_ADD);
+    } else {
+        fnSetRenderState(dev, D3DRS_ALPHABLENDENABLE, 0);
+    }
 
     g_vid_phase = 6;
     if (textured) {
@@ -2344,18 +2765,27 @@ static void vid_render_quad(IDirect3DDevice8 *dev,
         fnSetTextureStageState(dev, 0, D3DTSS_COLOROP,   D3DTOP_MODULATE);
         fnSetTextureStageState(dev, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
         fnSetTextureStageState(dev, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-        fnSetTextureStageState(dev, 0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
-        fnSetTextureStageState(dev, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        if (blend) {
+            // Fade path: final alpha = texture.a * diffuse.a so the ramping diffuse
+            // ALPHA drives the dissolve (texture alpha is 0xFF for the cover PNG /
+            // the meteor BGRA, so this is effectively the diffuse alpha).
+            fnSetTextureStageState(dev, 0, D3DTSS_ALPHAOP,   D3DTOP_MODULATE);
+            fnSetTextureStageState(dev, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+            fnSetTextureStageState(dev, 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+        } else {
+            fnSetTextureStageState(dev, 0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+            fnSetTextureStageState(dev, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        }
         fnSetTextureStageState(dev, 1, D3DTSS_COLOROP,   D3DTOP_DISABLE);
         fnSetTextureStageState(dev, 1, D3DTSS_ALPHAOP,   D3DTOP_DISABLE);
-        fnSetTexture(dev, 0, g_video.texture);
+        fnSetTexture(dev, 0, tex);
         {   // one-shot: confirm the bound texture == the CreateTexture'd ptr.
             static long s_bind_logged = 0;
             if (!s_bind_logged) {
                 s_bind_logged = 1;
-                log_line("[video] SetTexture stage0 tex=%p (created=%p) op=MODULATE "
-                         "arg1=TEXTURE(0x2) arg2=DIFFUSE",
-                         (void *)g_video.texture, (void *)g_video.texture);
+                log_line("[video] SetTexture stage0 tex=%p op=MODULATE "
+                         "arg1=TEXTURE(0x2) arg2=DIFFUSE blend=%d",
+                         (void *)tex, blend);
             }
         }
     } else {
@@ -2385,15 +2815,15 @@ static void vid_render_quad(IDirect3DDevice8 *dev,
     if (textured) fnSetTexture(dev, 0, NULL);
 }
 
-// Aspect-fit the frame rect inside the viewport (letterbox/pillarbox).
-static void vid_compute_rect(int vp_w, int vp_h,
-                             float *x1, float *y1, float *x2, float *y2)
+// Aspect-fit a (fw x fh) frame inside the viewport (letterbox/pillarbox).
+static void vid_compute_rect_dims(int vp_w, int vp_h, int fw, int fh,
+                                  float *x1, float *y1, float *x2, float *y2)
 {
     *x1 = *y1 = *x2 = *y2 = 0.0f;
-    if (vp_w <= 0 || vp_h <= 0 || g_video.frame_w <= 0 || g_video.frame_h <= 0)
+    if (vp_w <= 0 || vp_h <= 0 || fw <= 0 || fh <= 0)
         return;
-    float fa = (float)g_video.frame_w / (float)g_video.frame_h;  // frame aspect
-    float sa = (float)vp_w / (float)vp_h;                        // screen aspect
+    float fa = (float)fw / (float)fh;        // frame aspect
+    float sa = (float)vp_w / (float)vp_h;    // screen aspect
     float w, h;
     if (fa > sa) {                 // frame wider -> width-limited (pillarbox vertical)
         w = (float)vp_w;
@@ -2446,13 +2876,9 @@ static int vid_query_backbuffer(IDirect3DDevice8 *dev, int *out_w, int *out_h,
     return ok;
 }
 
-// NOTE: the CopyRects SYSTEMMEM->backbuffer blit path (vid_ensure_syssurf /
-// vid_copyrects_blit) and the VideoDiag fill it carried were REMOVED 2026-06-17.
-// CopyRects was abandoned (dgVoodoo2's D3D8->D3D11 wrapper does not pick up a
-// CopyRects to the emulated backbuffer at Present time) and had ZERO call sites —
-// the only blit path in use is the textured-quad (vid_draw_overlay). The dead
-// state (sysSurf/sys_w/sys_h/sys_fmt/copyrects_logged) and the CreateImageSurface/
-// CopyRects/Surf_LockRect ABI typedefs were pruned with it.
+// NOTE: the only blit path is the textured-quad (vid_draw_overlay) — there is no
+// CopyRects SYSTEMMEM->backbuffer path (dgVoodoo2's D3D8->D3D11 wrapper does not
+// pick up a CopyRects to the emulated backbuffer at Present time).
 
 // ---- viewport force/restore around our Present-time draw ----
 //
@@ -2652,18 +3078,26 @@ static void vid_restore_state(IDirect3DDevice8 *dev)
     }
 }
 
-// Draw the overlay (the textured video) inside our own BeginScene/EndScene pair
-// (dgVoodoo2 throws on DrawPrimitiveUP outside a scene; Hook_Present runs AFTER
-// the engine's EndScene). The active viewport is forced to the FULL backbuffer for
-// the draw and restored after, so RHW vertices are not clipped to the engine's
-// last (sub-region) SetViewport.
+// Draw a fullscreen overlay (a black underlay + an aspect-fit textured quad)
+// inside our own BeginScene/EndScene pair (dgVoodoo2 throws on DrawPrimitiveUP
+// outside a scene; Hook_Present runs AFTER the engine's EndScene). The active
+// viewport is forced to the FULL backbuffer for the draw and restored after, so
+// RHW vertices are not clipped to the engine's last (sub-region) SetViewport.
+// EVERY draw goes through this so the engine state is captured + restored verbatim
+// (the white-out bug was a draw that leaked render state — this is why the video
+// never corrupts the screen, and the boot cover reuses it for the same guarantee).
 //
-// Draws an opaque BLACK fullscreen underlay (the letterbox bars + a guaranteed
-// clean black behind the video) THEN the aspect-fit textured video quad
-// (diffuse=0xFFFFFFFF so MODULATE texture*white == texture).
+//   `tex`     = the texture to draw (g_video.texture for the meteor, cover_tex for
+//               the boot cover still).
+//   `diffuse` = per-vertex diffuse color/alpha. 0xFFFFFFFF = opaque untinted;
+//               a ramping alpha drives the cover fade-out / meteor fade-in.
+//   `blend`   = 1 -> the quad alpha-blends over the black underlay (so a diffuse
+//               alpha < 0xFF fades it to black). 0 -> opaque (the meteor's normal
+//               full-alpha path).
 //
 // vp_w/vp_h are the FULL backbuffer dims. Returns 1 if the draw was issued.
-static int vid_draw_overlay(IDirect3DDevice8 *dev, int vp_w, int vp_h)
+static int vid_draw_overlay_tex(IDirect3DDevice8 *dev, int vp_w, int vp_h,
+                                IDirect3DTexture8 *tex, DWORD diffuse, int blend)
 {
     void **vt = *(void ***)dev;
     BeginScene_t fnBeginScene = (BeginScene_t)vt[34];
@@ -2702,14 +3136,19 @@ static int vid_draw_overlay(IDirect3DDevice8 *dev, int vp_w, int vp_h)
     fnBeginScene(dev);
 
     // Opaque black fullscreen underlay (letterbox bars + clean black behind the
-    // video), then the aspect-fit textured video. diffuse=0xFFFFFFFF: MODULATE
-    // texture*white == texture.
+    // video / the fade target), then the aspect-fit textured quad. For the meteor
+    // diffuse=0xFFFFFFFF: MODULATE texture*white == texture. For the cover fade /
+    // meteor fade-in the diffuse alpha < 0xFF dissolves the quad over this black.
     vid_render_quad(dev, 0.0f, 0.0f, (float)vp_w, (float)vp_h,
-                    /*textured=*/0, /*diffuse=*/0xFF000000u);
+                    /*textured=*/0, /*diffuse=*/0xFF000000u, /*tex=*/NULL, /*blend=*/0);
+    // Aspect-fit the texture: the cover uses its own dims, the meteor uses the
+    // decode dims. (cover_tex is non-NULL only for the boot cover still.)
+    int fw = g_video.frame_w, fh = g_video.frame_h;
+    if (tex && tex == g_video.cover_tex) { fw = g_video.cover_w; fh = g_video.cover_h; }
     float x1, y1, x2, y2;
-    vid_compute_rect(vp_w, vp_h, &x1, &y1, &x2, &y2);
+    vid_compute_rect_dims(vp_w, vp_h, fw, fh, &x1, &y1, &x2, &y2);
     vid_render_quad(dev, x1, y1, x2, y2,
-                    /*textured=*/1, /*diffuse=*/0xFFFFFFFFu);
+                    /*textured=*/1, diffuse, tex, blend);
 
     g_vid_phase = 9;
     fnEndScene(dev);
@@ -2724,6 +3163,254 @@ static int vid_draw_overlay(IDirect3DDevice8 *dev, int vp_w, int vp_h)
     // last frame, no broken hex background from leaked render/texture-stage states.
     vid_restore_state(dev);
     return 1;
+}
+
+// Meteor/video convenience wrapper: draw g_video.texture. `diffuse`/`blend` carry
+// the optional boot-leg fade-IN (diffuse alpha 0->255, blend=1); the char-create
+// leg and the steady meteor pass 0xFFFFFFFF + blend=0 (opaque, original behavior).
+static int vid_draw_overlay(IDirect3DDevice8 *dev, int vp_w, int vp_h,
+                            DWORD diffuse, int blend)
+{
+    return vid_draw_overlay_tex(dev, vp_w, vp_h, g_video.texture, diffuse, blend);
+}
+
+// =====================================================================
+// ==== BOOT COVER still image (replaces mod_boot_poster.c's draw) =====
+// =====================================================================
+//
+// Loads patches/psobb_boot_poster.png (mirroring bp_decode_png: stbi_load(...,4)
+// then RGBA->BGRA swizzle for A8R8G8B8, area-downscale anything over the texture
+// cap), uploads it to a MANAGED texture, and draws it fullscreen through
+// vid_draw_overlay_tex so it goes through the same state capture/restore. The boot
+// leg owns the cover timing: opaque hold -> diffuse-alpha fade-out -> meteor start.
+
+// Decode the cover PNG into BGRA (g_video.cover_rgba + cover_w/h). One-shot
+// (cover_load_tried). On any failure cover_ok stays 0 and the boot leg just skips
+// straight to the meteor (no cover). Mirrors bp_decode_png.
+static void vid_cover_load_png(void)
+{
+    if (g_video.cover_load_tried) return;
+    g_video.cover_load_tried = 1;
+
+    char path[MAX_PATH];
+    vid_resolve_path("patches\\psobb_boot_poster.png", path, sizeof(path));
+    if (!path[0] || !vid_file_exists(path)) {
+        log_line("[video] cover: no PNG at '%s' (skip cover, straight to meteor)", path);
+        return;
+    }
+    int w = 0, h = 0, ch = 0;
+    unsigned char *rgba = stbi_load(path, &w, &h, &ch, 4);
+    if (!rgba || w <= 0 || h <= 0) {
+        log_line("[video] cover: stbi_load failed for '%s'", path);
+        if (rgba) stbi_image_free(rgba);
+        return;
+    }
+    // RGBA (stb) -> BGRA (D3DFMT_A8R8G8B8): swap R<->B in place.
+    size_t pixels = (size_t)w * (size_t)h;
+    unsigned char *p = rgba;
+    for (size_t i = 0; i < pixels; ++i, p += 4) {
+        unsigned char r = p[0]; p[0] = p[2]; p[2] = r;
+    }
+    // Area-downscale anything over the texture cap (aspect-preserved), mirroring
+    // bp_downscale_rgba — some wrappers SEH on an oversized texture upload.
+    if (w > VID_COVER_MAX_DIM || h > VID_COVER_MAX_DIM) {
+        int nw, nh;
+        if (w >= h) { nw = VID_COVER_MAX_DIM; nh = (int)((long long)h * VID_COVER_MAX_DIM / w); }
+        else        { nh = VID_COVER_MAX_DIM; nw = (int)((long long)w * VID_COVER_MAX_DIM / h); }
+        if (nw < 1) nw = 1;
+        if (nh < 1) nh = 1;
+        unsigned char *dst = (unsigned char *)malloc((size_t)nw * (size_t)nh * 4);
+        if (dst) {
+            for (int dy = 0; dy < nh; ++dy) {
+                int sy0 = (int)((long long)dy * h / nh);
+                int sy1 = (int)((long long)(dy + 1) * h / nh);
+                if (sy1 <= sy0) sy1 = sy0 + 1;
+                for (int dx = 0; dx < nw; ++dx) {
+                    int sx0 = (int)((long long)dx * w / nw);
+                    int sx1 = (int)((long long)(dx + 1) * w / nw);
+                    if (sx1 <= sx0) sx1 = sx0 + 1;
+                    unsigned a0 = 0, a1 = 0, a2 = 0, a3 = 0, n = 0;
+                    for (int sy = sy0; sy < sy1; ++sy)
+                        for (int sx = sx0; sx < sx1; ++sx) {
+                            const unsigned char *s = rgba + ((size_t)sy * w + sx) * 4;
+                            a0 += s[0]; a1 += s[1]; a2 += s[2]; a3 += s[3]; ++n;
+                        }
+                    unsigned char *d = dst + ((size_t)dy * nw + dx) * 4;
+                    d[0] = (unsigned char)(a0 / n); d[1] = (unsigned char)(a1 / n);
+                    d[2] = (unsigned char)(a2 / n); d[3] = (unsigned char)(a3 / n);
+                }
+            }
+            log_line("[video] cover: downscaled %dx%d -> %dx%d (cap %d)",
+                     w, h, nw, nh, VID_COVER_MAX_DIM);
+            stbi_image_free(rgba);
+            rgba = dst; w = nw; h = nh;
+        }
+    }
+    g_video.cover_rgba = rgba;
+    g_video.cover_w = w;
+    g_video.cover_h = h;
+    log_line("[video] cover: decoded PNG %dx%d (orig channels=%d)", w, h, ch);
+}
+
+// Create + upload the cover texture (A8R8G8B8 MANAGED). Frees cover_rgba after
+// upload. Pitch-CLAMPED row blit (vid_blit_rows). Returns 1 once cover_ok.
+static int vid_cover_upload(IDirect3DDevice8 *dev)
+{
+    if (g_video.cover_ok) return 1;
+    if (!g_video.cover_rgba || g_video.cover_w <= 0 || g_video.cover_h <= 0) return 0;
+    void **vt = *(void ***)dev;
+    CreateTexture_t fnCreateTexture = (CreateTexture_t)vt[20];
+    HRESULT hr = fnCreateTexture(dev, (UINT)g_video.cover_w, (UINT)g_video.cover_h,
+                                 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+                                 &g_video.cover_tex);
+    if (FAILED(hr) || !g_video.cover_tex) {
+        log_line("[video] cover: CreateTexture FAILED hr=0x%08x", hr);
+        g_video.cover_tex = NULL;
+        return 0;
+    }
+    void **tvt = *(void ***)g_video.cover_tex;
+    Tex_LockRect_t   fnLockRect   = (Tex_LockRect_t)tvt[16];
+    Tex_UnlockRect_t fnUnlockRect = (Tex_UnlockRect_t)tvt[17];
+    D3DLOCKED_RECT_X lr; lr.pBits = NULL; lr.Pitch = 0;
+    hr = fnLockRect(g_video.cover_tex, 0, &lr, NULL, 0);
+    if (FAILED(hr) || !lr.pBits || lr.Pitch <= 0) {
+        log_line("[video] cover: LockRect FAILED hr=0x%08x pitch=%ld", hr, (long)lr.Pitch);
+        if (lr.pBits) fnUnlockRect(g_video.cover_tex, 0);
+        IUnknown_Release_t fnRelease = (IUnknown_Release_t)tvt[2];
+        fnRelease(g_video.cover_tex);
+        g_video.cover_tex = NULL;
+        return 0;
+    }
+    int ok = vid_blit_rows(lr.pBits, lr.Pitch, g_video.cover_rgba,
+                           g_video.cover_w * 4, g_video.cover_h);
+    fnUnlockRect(g_video.cover_tex, 0);
+    if (!ok) {
+        IUnknown_Release_t fnRelease = (IUnknown_Release_t)tvt[2];
+        fnRelease(g_video.cover_tex);
+        g_video.cover_tex = NULL;
+        return 0;
+    }
+    // Managed pool keeps its own backing copy; free the CPU buffer.
+    stbi_image_free(g_video.cover_rgba);
+    g_video.cover_rgba = NULL;
+    g_video.cover_ok = 1;
+    log_line("[video] cover: uploaded %dx%d (managed)", g_video.cover_w, g_video.cover_h);
+    return 1;
+}
+
+// Release the cover texture + any CPU buffer (teardown / detach). Idempotent.
+static void vid_cover_release(void)
+{
+    if (g_video.cover_tex) {
+        __try {
+            void **tvt = *(void ***)g_video.cover_tex;
+            IUnknown_Release_t fnRelease = (IUnknown_Release_t)tvt[2];
+            fnRelease(g_video.cover_tex);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* swallow */ }
+        g_video.cover_tex = NULL;
+    }
+    if (g_video.cover_rgba) { stbi_image_free(g_video.cover_rgba); g_video.cover_rgba = NULL; }
+    g_video.cover_ok = 0;
+}
+
+// Focus-gated skip read for the cover (mirrors vid_skip_pressed's debounce/focus
+// discipline, but tracks its OWN edge state — vid_skip_pressed's debounce is
+// session-scoped and not yet seeded during the cover phase). Returns 1 on a fresh
+// Enter/Esc up->down edge while the game is focused. Only meaningful during the
+// OPAQUE hold (the caller jumps to the fade); ignored once fading.
+static int vid_cover_skip_pressed(void)
+{
+    if (!g_video.skippable) return 0;
+    SHORT ret = GetAsyncKeyState(VK_RETURN);
+    SHORT esc = GetAsyncKeyState(VK_ESCAPE);
+    int down = ((ret & 0x8000) != 0) || ((esc & 0x8000) != 0);
+    if (!vid_app_focused()) { g_video.cover_skip_prev_down = down; return 0; }
+    // Require both keys seen UP once (covers a key held from launch / the slot-
+    // confirm Enter), then skip ONLY on a fresh up->down edge.
+    if (!g_video.cover_skip_seen_up) {
+        if (!down) g_video.cover_skip_seen_up = 1;
+        g_video.cover_skip_prev_down = down;
+        return 0;
+    }
+    int edge = down && !g_video.cover_skip_prev_down;
+    g_video.cover_skip_prev_down = down;
+    return edge ? 1 : 0;
+}
+
+// Advance the boot-cover phase + draw it. Returns 1 while the cover OWNS the
+// screen (caller must NOT start the meteor yet), 0 once the cover is DONE (fade
+// finished or no cover) so the boot leg proceeds to vid_start the meteor.
+//
+// Phase flow (wall-clock, GetTickCount):
+//   load -> phase=2 OPAQUE hold (VID_COVER_HOLD_MS, diffuse alpha 255).
+//           Enter/Esc during the hold -> jump to phase=3 (start the fade NOW).
+//        -> phase=3 FADE: diffuse alpha ramps 255->0 over VID_COVER_FADE_MS.
+//        -> phase=4 DONE: return 0; the boot leg starts the meteor (which then
+//           fades IN from black).
+static int vid_cover_present(IDirect3DDevice8 *dev, int vp_w, int vp_h)
+{
+    if (g_video.cover_phase >= 4) return 0;   // already done
+
+    // Lazy load on first call.
+    if (g_video.cover_phase == 0) {
+        vid_cover_load_png();
+        if (!g_video.cover_rgba) {            // no PNG / decode failed -> no cover
+            g_video.cover_phase = 4;
+            return 0;
+        }
+        g_video.cover_phase = 1;              // loaded; upload happens below
+    }
+
+    // Upload (retry until the device is texture-able; bounded by the meteor's hard
+    // cap in the caller). If it permanently can't upload, give up on the cover.
+    if (!g_video.cover_ok) {
+        int up = 0;
+        __try { up = vid_cover_upload(dev); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { up = 0; vid_cover_release(); }
+        if (!up) return 1;                    // hold (black) until it uploads
+        // Uploaded this frame -> begin the opaque hold.
+        g_video.cover_phase    = 2;
+        g_video.cover_phase_ms = GetTickCount();
+        log_line("[video] cover: hold begins (%ums opaque, then %ums fade)",
+                 (unsigned)VID_COVER_HOLD_MS, (unsigned)VID_COVER_FADE_MS);
+    }
+
+    DWORD now = GetTickCount();
+
+    // OPAQUE hold: full alpha. Enter/Esc -> jump straight to the fade (never a hard
+    // cut). Otherwise transition to the fade after VID_COVER_HOLD_MS.
+    if (g_video.cover_phase == 2) {
+        if (vid_cover_skip_pressed() ||
+            (now - g_video.cover_phase_ms) >= (DWORD)VID_COVER_HOLD_MS) {
+            g_video.cover_phase    = 3;
+            g_video.cover_phase_ms = now;
+            log_line("[video] cover: fade-out begins (%ums)", (unsigned)VID_COVER_FADE_MS);
+        }
+        __try {
+            vid_draw_overlay_tex(dev, vp_w, vp_h, g_video.cover_tex,
+                                 0xFFFFFFFFu, /*blend=*/1);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* swallow */ }
+        return 1;
+    }
+
+    // FADE: diffuse alpha 255->0 over VID_COVER_FADE_MS. At end -> DONE (meteor).
+    if (g_video.cover_phase == 3) {
+        DWORD dt = now - g_video.cover_phase_ms;
+        if (dt >= (DWORD)VID_COVER_FADE_MS) {
+            g_video.cover_phase = 4;          // fade complete -> meteor starts
+            return 0;
+        }
+        float t = 1.0f - (float)dt / (float)VID_COVER_FADE_MS;  // 1 -> 0
+        DWORD a = (DWORD)(t * 255.0f + 0.5f);
+        if (a > 255) a = 255;
+        DWORD diffuse = (a << 24) | 0x00FFFFFFu;               // ARGB, alpha=a
+        __try {
+            vid_draw_overlay_tex(dev, vp_w, vp_h, g_video.cover_tex, diffuse, /*blend=*/1);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* swallow */ }
+        return 1;
+    }
+
+    return 1;   // phase 1 with cover_ok not yet set is handled above; safety hold
 }
 
 // ---- ENGINE-EXIT ARM (CHARCREATE trigger) -------------------------------
@@ -2750,13 +3437,14 @@ static int vid_draw_overlay(IDirect3DDevice8 *dev, int vp_w, int vp_h)
 static void cc_arm_engine_exit(const char *why)
 {
     // POD-only SEH firewall (two byte stores, no C++ unwinding objects -> no C2712).
+    // Arm the engine 3->5 exit: the owned-frame replica reads these next frame and
+    // issues request(5) WITHOUT running the input pump, so the skip Enter never
+    // cascades into class-select (the trampoline DID run the pump -> auto-Hunter).
     __try {
         *CC_EXIT_FLAG_980_R = 1;   // discriminator first: ==1 -> replica takes request(5) path
         *CC_EXIT_FLAG_988_R = 1;   // gate second: substate -> owned_sub1 (triggers replica read)
-        log_line("[video] cc engine-exit armed (%s): 0xAAE980=1 0xAAE988=1 -> engine request(5)",
+        log_line("[video] cc engine-exit armed (%s): 0xAAE980=1 0xAAE988=1 -> request(5)",
                  why ? why : "?");
-        log_line("[adiag] arm 0xAAE980/0xAAE988 (%s) scene=%d cc_session=%ld",
-                 why ? why : "?", adiag_scene(), (long)adiag_cc());
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log_line("[video] cc engine-exit arm SEH (flag write skipped)");
     }
@@ -2772,7 +3460,11 @@ static void cc_arm_engine_exit(const char *why)
 // engine consumes the flags on its next frame).
 static int cc_session_hold_for_exit(const char *why)
 {
-    if (g_video.trigger != VID_TRIGGER_CHARCREATE) return 0;
+    // cc_session is the REAL discriminator: the BOOT leg of trigger=both never sets
+    // it, so a boot-leg EOF/skip/watchdog returns 0 here and tears down directly
+    // (no engine 3->5 exit armed — that is char-create-only). Accept BOTH so the
+    // char leg of trigger=both still holds-for-exit exactly like CHARCREATE.
+    if (!cc_is_charcreate_trigger()) return 0;
     if (!InterlockedCompareExchange(&g_video.cc_session, 0, 0)) return 0;  // gate = our session
     cc_arm_engine_exit(why);
     return 1;   // hold the cover; the engine drives the teardown via request(5)
@@ -2828,20 +3520,81 @@ static void vid_present_body(IDirect3DDevice8 *dev, int vp_w, int vp_h)
         // so we just fall through; nothing to draw.
     }
 
+    // VID_TRIGGER_BOTH boot-leg END detector: the boot leg always tears down via
+    // vid_teardown (cc_session is never set for it, so cc_session_hold_for_exit
+    // returns 0). vid_teardown already did the FULL reset — MF reader/ffmpeg child
+    // closed, playing=0, eof=0, ring cleared, texture freed. Here we finish the
+    // hand-off: SWITCH the active source boot_path -> char_path, CONSUME the boot
+    // one-shot (start_requested=0, present_seen=0), and latch boot_leg_done so the
+    // leg select below routes to the request(3)-driven CHAR leg. One-shot: keys off
+    // (boot_leg_started && !boot_leg_done && !playing).
+    if (g_video.trigger == VID_TRIGGER_BOTH &&
+        g_video.boot_leg_started && !g_video.boot_leg_done &&
+        !InterlockedCompareExchange(&g_video.playing, 0, 0)) {
+        g_video.boot_leg_done   = 1;
+        g_video.start_requested = 0;   // consume any stray boot one-shot
+        g_video.present_seen    = 0;
+        if (g_video.char_path[0])
+            _snprintf_s(g_video.path, sizeof(g_video.path), _TRUNCATE,
+                        "%s", g_video.char_path);
+        log_line("[video] both: boot leg ended -> active path now char='%s'",
+                 g_video.path);
+    }
+
+    // VID_TRIGGER_BOTH leg select: the BOOT one-shot leg runs first (present-count
+    // start, boot_path). Once it ends (boot_leg_done set at its teardown, or by an
+    // early request(3)), the request(3)-driven CHAR leg takes over (char_path). We
+    // express this by treating BOTH as BOOT while !boot_leg_done, and as CHARCREATE
+    // after — reusing the exact same one-shot paths below, so each leg behaves
+    // byte-identically to the standalone trigger it mirrors.
+    int eff_trigger = g_video.trigger;
+    if (g_video.trigger == VID_TRIGGER_BOTH)
+        eff_trigger = g_video.boot_leg_done ? VID_TRIGGER_CHARCREATE
+                                            : VID_TRIGGER_BOOT;
+
     // We never start a new session while one is already playing.
     if (!InterlockedCompareExchange(&g_video.playing, 0, 0)) {
-        if (g_video.trigger == VID_TRIGGER_BOOT) {
+        if (eff_trigger == VID_TRIGGER_BOOT) {
             // BOOT: one-shot start after a short device warm-up (the former
             // Stage-1 boot-test path, now mode-gated). The clip covers the boot
-            // splash / lands on the title once it ends or is skipped.
+            // splash / lands on the title once it ends or is skipped. For BOTH this
+            // is the BOOT leg (boot_path); the char leg below takes over after.
             if (g_video.start_requested) {
                 LONG seen = InterlockedIncrement(&g_video.present_seen);
+                if (seen == 1) g_video.boot_first_ms = GetTickCount();
+                DWORD held = g_video.boot_first_ms ? (GetTickCount() - g_video.boot_first_ms) : 0;
+
+                // BOOT COVER: after a short warm-up, show the still cover (load +
+                // upload + opaque hold + fade-out, all through vid_draw_overlay_tex's
+                // state capture/restore). vid_cover_present returns 1 while the cover
+                // OWNS the screen -> draw it + return (meteor waits). It returns 0 once
+                // the fade completes (or there is no cover PNG) -> start the meteor,
+                // which then fades IN from black. The hard cap force-starts the meteor
+                // if the cover never finishes (device never texture-able), so the boot
+                // can't stall on black. This REPLACES the old boot_poster_shown_ms gate.
                 if (seen >= VID_START_AFTER_PRESENTS) {
+                    int cover_busy = vid_cover_present(dev, vp_w, vp_h);
+                    int cap_hit = (held >= VID_BOOT_HARD_CAP_MS);
+                    if (cover_busy && !cap_hit)
+                        return;                    // cover on screen; meteor waits
+                    // Cover done (or hard cap) -> start the meteor with a fade-in.
                     g_video.start_requested = 0;   // one-shot
-                    vid_start(dev, vp_w, vp_h);
+                    if (vid_start(dev, vp_w, vp_h)) {
+                        g_video.meteor_fadein_ms = GetTickCount();  // boot leg: fade IN
+                        vid_cover_release();           // cover's job is done; free its texture
+                        boot_poster_force_disable();   // legacy poster: don't let it re-show
+                        if (g_video.trigger == VID_TRIGGER_BOTH) {
+                            g_video.boot_leg_started = 1;  // both-mode: mark boot leg live
+                            // Silence the engine/title BGM while the boot leg plays (the
+                            // title boots live underneath). cc_audio_arm zeros SOUNDCTRL
+                            // (engine master) but NOT our MF video audio; vid_teardown
+                            // disarms + restores it when the boot leg ends.
+                            cc_audio_arm();
+                        }
+                    }
                 }
             }
-        } else if (g_video.trigger == VID_TRIGGER_CHARCREATE) {
+        } else if (eff_trigger == VID_TRIGGER_CHARCREATE) {
             // CHARCREATE: start when cc_on_request (the 0x007A60DC source-event
             // hook) saw request(3) and raised start_requested. NO scene poll.
             // The overlay COVERS the engine's scripted starfield intro (the
@@ -2887,18 +3640,42 @@ static void vid_present_body(IDirect3DDevice8 *dev, int vp_w, int vp_h)
         }
     }
 
-    // --- skip ---
-    if (vid_skip_pressed()) {
-        if (cc_session_hold_for_exit("skip")) return;
-        vid_teardown("skip");
+    // --- skip-drain (BOOT leg only): a skip already fired but the key is still
+    // held. Hold the cover up (fall through to redraw the last frame) until BOTH
+    // Enter and Esc read UP, THEN teardown. This stops the revealed title from
+    // polling the still-down Enter as a fresh press and popping its menu — one
+    // Enter skips cleanly, a SECOND Enter opens the menu. cc_session is never set
+    // on the boot leg, so this never touches the char-create path. Checked BEFORE
+    // the EOF logic below so the cover holds even if the reader hits EOF mid-drain.
+    if (g_video.skip_draining) {
+        if (vid_skip_keys_up()) {
+            g_video.skip_draining = 0;
+            // RELEASED -> NOW hand off. Char-create: arm the engine's 3->5 exit (the
+            // replica issues request(5) next frame). Boot: tear down. Because we waited
+            // for the release, the held Enter is GONE before the next scene reads input,
+            // so it cannot cascade (char-create class-select auto-Hunter / boot menu).
+            if (cc_session_hold_for_exit("skip (key released)")) return;
+            vid_teardown("skip (key released)");
+            return;
+        }
+        // keys still held -> fall through and redraw the last frame (cover up).
+    } else if (vid_skip_pressed()) {
+        // BOTH legs WAIT for the skip key to RELEASE before handing off, so a held
+        // Enter never cascades into the next scene (handing off on a still-down Enter
+        // lets class-select read it and auto-pick Hunter — this is the input-leak fix).
+        if (!vid_skip_keys_up()) {
+            g_video.skip_draining = 1;
+            log_line("[video] skip: key still held -> draining (hold cover until release)");
+            return;   // hold the cover (redraw last frame) until release
+        }
+        // keys already up this Present -> hand off now.
+        if (cc_session_hold_for_exit("skip")) return;   // char-create: arm engine 3->5 exit
+        vid_teardown("skip");                            // boot: tear down
         return;
     }
 
-    // (VideoDiag RED-quad isolation render path REMOVED 2026-06-17 — it was a
-    //  diagnostic-only fullscreen TFACTOR quad used to prove the draw path under
-    //  dgVoodoo2; the textured video path is now the only render path. The diag
-    //  config field is still accepted by mod_video_init for ABI stability but no
-    //  longer drives any render.)
+    // (The diag config field is accepted by mod_video_init for ABI stability but
+    //  drives no render — the textured video path is the only render path.)
 
     // --- pick the latest DUE frame by wall-clock ---
     LONG filled = InterlockedCompareExchange(&g_video.ring_filled, 0, 0);
@@ -2944,6 +3721,19 @@ static void vid_present_body(IDirect3DDevice8 *dev, int vp_w, int vp_h)
         // reports EOF, tear down. While a cover session is up, instead ARM the
         // engine's 3->5 exit and HOLD the last frame (cover stays up) until the
         // engine fires request(5) -> cc_on_request(5) -> stop_requested -> teardown.
+        // Boot leg (non-cover): tear down the instant the reader signals EOF so the
+        // title is revealed and (trigger=both) the char leg can take over. Do NOT
+        // wait for the presentation clock to pass the last frame (di > newest_index)
+        // — that gate can lag seconds, which was freezing the boot logo on screen.
+        // While a BOOT-leg skip is draining (key still held) the cover MUST stay
+        // up even if the reader hits EOF — otherwise EOF would tear down and the
+        // held Enter would leak to the title. The drain handler above owns the
+        // teardown once both keys release.
+        if (eof && !g_video.skip_draining &&
+            !InterlockedCompareExchange(&g_video.cc_session, 0, 0)) {
+            vid_teardown("eof (boot leg)");
+            return;
+        }
         if (eof && di > newest_index) {
             if (!cc_session_hold_for_exit("eof")) {
                 vid_teardown("eof");
@@ -2980,15 +3770,35 @@ static void vid_present_body(IDirect3DDevice8 *dev, int vp_w, int vp_h)
         return;
     }
 
-    if (vid_draw_overlay(dev, vp_w, vp_h)) {
+    // Meteor diffuse: the BOOT leg fades the meteor IN from black over
+    // VID_METEOR_FADEIN_MS (meteor_fadein_ms is set at vid_start; cleared once the
+    // window elapses). The char-create intros leg never sets it -> constant
+    // 0xFFFFFFFF opaque (no fade-in). Fully opaque after the window -> blend off,
+    // identical to the original meteor path.
+    DWORD diffuse = 0xFFFFFFFFu;
+    int   blend   = 0;
+    if (g_video.meteor_fadein_ms) {
+        DWORD dt = GetTickCount() - g_video.meteor_fadein_ms;
+        if (dt < (DWORD)VID_METEOR_FADEIN_MS) {
+            float t = (float)dt / (float)VID_METEOR_FADEIN_MS;    // 0 -> 1
+            DWORD a = (DWORD)(t * 255.0f + 0.5f);
+            if (a > 255) a = 255;
+            diffuse = (a << 24) | 0x00FFFFFFu;                    // alpha ramps up
+            blend   = 1;
+        } else {
+            g_video.meteor_fadein_ms = 0;                         // fade-in done
+        }
+    }
+
+    if (vid_draw_overlay(dev, vp_w, vp_h, diffuse, blend)) {
         g_video.last_copied_index = newest_index;
     }
 }
 
 // ---- public API ----
 
-void mod_video_init(const char *path, int enabled, int skippable,
-                    const char *ffmpeg_path, int max_seconds,
+void mod_video_init(const char *path, const char *boot_path, int enabled,
+                    int skippable, const char *ffmpeg_path, int max_seconds,
                     int skip_debounce_ms, int audio, int diag, int trigger,
                     int decoder)
 {
@@ -3005,11 +3815,22 @@ void mod_video_init(const char *path, int enabled, int skippable,
     g_video.trigger          = trigger;
     g_video.decoder          = decoder;
     g_video.cc_session       = 0;
+    g_video.cc_exit_armed    = 0;
     g_video.stop_requested   = 0;
     g_video.newest_slot      = -1;
     g_video.newest_index     = -1;
     g_video.last_uploaded_index = -1;
     g_video.last_copied_index   = -1;
+    // BOOT cover still + meteor fade-in state (zeroed; cover loads lazily at boot).
+    g_video.cover_phase       = 0;
+    g_video.cover_load_tried  = 0;
+    g_video.cover_ok          = 0;
+    g_video.cover_w = g_video.cover_h = 0;
+    g_video.cover_rgba        = NULL;
+    g_video.cover_tex         = NULL;
+    g_video.cover_skip_seen_up = 0;
+    g_video.cover_skip_prev_down = 0;
+    g_video.meteor_fadein_ms  = 0;
 
     if (!enabled) {
         // Dormant: do not even resolve paths. on_present is a pure no-op.
@@ -3017,7 +3838,17 @@ void mod_video_init(const char *path, int enabled, int skippable,
         return;
     }
 
-    vid_resolve_path(path, g_video.path, sizeof(g_video.path));
+    // path = CHAR-CREATE leg source; boot_path = BOOT leg source (trigger=both).
+    vid_resolve_path(path, g_video.char_path, sizeof(g_video.char_path));
+    if (boot_path && boot_path[0])
+        vid_resolve_path(boot_path, g_video.boot_path, sizeof(g_video.boot_path));
+    // Active source g_video.path: BOTH plays the boot leg FIRST (boot_path), then
+    // its teardown swaps the active path to char_path; boot/charcreate mirror the
+    // single source into both char_path and the active path.
+    if (trigger == VID_TRIGGER_BOTH && g_video.boot_path[0])
+        _snprintf_s(g_video.path, sizeof(g_video.path), _TRUNCATE, "%s", g_video.boot_path);
+    else
+        _snprintf_s(g_video.path, sizeof(g_video.path), _TRUNCATE, "%s", g_video.char_path);
     vid_resolve_path(ffmpeg_path, g_video.ffmpeg, sizeof(g_video.ffmpeg));
     if (audio && g_video.path[0]) {
         _snprintf_s(g_video.wav, sizeof(g_video.wav), _TRUNCATE,
@@ -3031,12 +3862,13 @@ void mod_video_init(const char *path, int enabled, int skippable,
              g_video.diag,
              trigger == VID_TRIGGER_CHARCREATE ? "charcreate"
            : trigger == VID_TRIGGER_BOOT       ? "boot"
+           : trigger == VID_TRIGGER_BOTH       ? "both"
                                                : "off",
              g_video.decoder == VID_DECODER_FFMPEG ? "ffmpeg" : "mf");
 
-    if (!g_video.path[0] || !vid_file_exists(g_video.path)) {
-        log_line("[video] source not found '%s' -> disabled (stock path)", g_video.path);
-        vid_disable_perm("source file missing");
+    if (!g_video.path[0] || !vid_embedded_exists(g_video.path)) {
+        log_line("[video] no embedded clip for '%s' -> disabled (stock path)", g_video.path);
+        vid_disable_perm("embedded clip missing");
         return;
     }
 
@@ -3053,7 +3885,8 @@ void mod_video_init(const char *path, int enabled, int skippable,
     // Arm the BOOT one-shot (mode==BOOT only). CHARCREATE arms off the
     // 0x007A60DC source-event hook's request(3) -> start_requested, so it starts
     // at 0 here; the hook raises it.
-    g_video.start_requested = (trigger == VID_TRIGGER_BOOT) ? 1 : 0;
+    g_video.start_requested = (trigger == VID_TRIGGER_BOOT ||
+                               trigger == VID_TRIGGER_BOTH) ? 1 : 0;
     g_video.present_seen    = 0;
 
     // CHARCREATE: install the two source-event hooks (the ONLY trigger that needs
@@ -3066,11 +3899,17 @@ void mod_video_init(const char *path, int enabled, int skippable,
     // real request(3) arms the cover. Failure is non-fatal (logged); the cover simply
     // never arms (no scene poll exists to fall back to). With trigger!=charcreate
     // NEITHER hook is installed -> the client is byte-identical to today.
-    if (trigger == VID_TRIGGER_CHARCREATE) {
+    if (trigger == VID_TRIGGER_CHARCREATE || trigger == VID_TRIGGER_BOTH) {
         if (!cc_request_hook_install())
             log_line("[video] cc source-event hook NOT installed -> cover disarmed");
         if (!cc_scene3_hook_install())
             log_line("[video] cc scene-3 ownership hook NOT installed -> overlay-only");
+        if (!cc_play_bgm_hook_install())
+            log_line("[video] intro-BGM-prevent hook NOT installed -> intro ADX may bleed");
+    }
+    if (trigger == VID_TRIGGER_BOOT || trigger == VID_TRIGGER_BOTH) {
+        if (!boot_title_hook_install())
+            log_line("[video] boot title-defer hooks NOT installed -> title builds under video (old behavior)");
     }
 }
 
@@ -3175,6 +4014,14 @@ void mod_video_on_device_lost(void)
         g_video.tex_w = g_video.tex_h = 0;
         g_video.last_uploaded_index = -1;
     }
+    // Drop the boot-cover texture too (if a Reset lands mid-cover). The CPU buffer
+    // was freed at upload, so force a clean re-load+re-upload on the next cover
+    // frame: only re-load if the cover was still active (not past its fade).
+    vid_cover_release();
+    if (g_video.cover_phase > 0 && g_video.cover_phase < 4) {
+        g_video.cover_load_tried = 0;   // re-decode the PNG (cover_rgba was freed)
+        g_video.cover_phase      = 0;   // restart the cover lifecycle cleanly
+    }
 }
 
 void mod_video_on_device_reset(void)
@@ -3199,6 +4046,7 @@ void mod_video_log_summary(void)
     // Best-effort final teardown so we never leave ffmpeg running on detach.
     // (vid_teardown also disarms the SOUNDCTRL mute as a safety net.)
     vid_teardown("detach");
+    vid_cover_release();   // free the boot-cover texture / CPU buffer (idempotent)
     // Restore the SOUNDCTRL flags explicitly too (idempotent) before removing hooks.
     cc_audio_disarm();
     // Remove the CHARCREATE source-event detour (mirrors pso_widescreen.c's
@@ -3207,4 +4055,6 @@ void mod_video_log_summary(void)
     // Remove the scene-3 OWNERSHIP replica detour (no-op if it was never installed).
     // Restores 0x007C1588 to byte-identical stock.
     cc_scene3_hook_uninstall();
+    cc_play_bgm_hook_uninstall();   // remove the intro-BGM-prevent detour
+    boot_title_hook_uninstall();    // remove the boot title-defer detours
 }

@@ -38,6 +38,13 @@
 #define VID_TRIGGER_OFF         0
 #define VID_TRIGGER_BOOT        1
 #define VID_TRIGGER_CHARCREATE  2
+// VID_TRIGGER_BOTH (2026-06-28): ONE mod_video instance plays the BOOT video at
+// boot (present-count one-shot, BOOT path) AND the CHAR-CREATE video at char-
+// create (request(3) source-event ownership, CHAR path). The BOOT leg NEVER arms
+// the char-create ownership writes (0xAAE980/0xAAE988); after the boot leg ends
+// (EOF/skip) the player fully resets and the active path switches boot->char so a
+// later request(3) is a clean fresh playback. Both legs stay Enter/Esc skippable.
+#define VID_TRIGGER_BOTH        3
 
 // VideoDecoder modes (parsed from the INI string in pso_widescreen.c).
 //   VID_DECODER_MF     — in-process Windows Media Foundation Source Reader
@@ -53,7 +60,13 @@
 // module stays fully dormant (every other entry point becomes a no-op).
 //
 //   enabled        VideoEnable        (0 = OFF, the default)
-//   path           VideoPath          (resolved relative to psobb.exe dir)
+//   path           VideoPath          (the CHAR-CREATE video; resolved relative
+//                                       to psobb.exe dir. Used as the SOLE video
+//                                       for trigger=boot/charcreate, and as the
+//                                       char-create leg for trigger=both.)
+//   boot_path      VideoBootPath       (the BOOT video; resolved relative to
+//                                       psobb.exe dir. Used ONLY by trigger=both
+//                                       as the boot leg. May be NULL/"" otherwise.)
 //   skippable      VideoSkippable     (1 = Enter/Esc skip with debounce)
 //   ffmpeg_path    VideoFfmpeg        ("" => "ffmpeg" on PATH / next to exe)
 //   max_seconds    VideoMaxSeconds    (hard watchdog per playback)
@@ -62,12 +75,12 @@
 //   diag           VideoDiag          (ACCEPTED but INERT as of 2026-06-17: the
 //                                       VideoDiag RED-quad isolation render path was
 //                                       pruned; the param is kept for ABI stability)
-//   trigger        VideoTrigger       (VID_TRIGGER_OFF/BOOT/CHARCREATE — what
-//                                       event starts playback; OFF = never)
+//   trigger        VideoTrigger       (VID_TRIGGER_OFF/BOOT/CHARCREATE/BOTH —
+//                                       what event(s) start playback; OFF = never)
 //   decoder        VideoDecoder       (VID_DECODER_MF [default, in-process MF]
 //                                       or VID_DECODER_FFMPEG [external pipe])
-void mod_video_init(const char *path, int enabled, int skippable,
-                    const char *ffmpeg_path, int max_seconds,
+void mod_video_init(const char *path, const char *boot_path, int enabled,
+                    int skippable, const char *ffmpeg_path, int max_seconds,
                     int skip_debounce_ms, int audio, int diag, int trigger,
                     int decoder);
 

@@ -76,7 +76,6 @@ typedef enum { SRC_SEGA = 0, SRC_ANZZ1, SRC_EPHINEA, SRC_TRINITY, SRC_OURS } bak
 #define GATE_MINIMAP       0x02
 #define GATE_RUNE          0x04
 #define GATE_STREAK_SCALE  0x08
-#define GATE_HANGAME       0x10
 #define GATE_SPLASH        0x20
 
 /* ---- one authoritative entry per engine VA ----
