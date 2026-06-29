@@ -5,9 +5,10 @@
 //
 // Resource names are the clip basenames (upper-cased); mod_video maps the configured
 // VideoPath/VideoBootPath basename to the matching resource. Paths are relative to
-// this .rc (the asi build dir) and point at the deployed compressed clips.
+// this .rc (the asi build dir) and point at the in-repo clips in asi/video/
+// (Git LFS-tracked, see .gitattributes) so a clean checkout rebuilds WITH the intros.
 
-PSO_BOOTSEQ_16X9 RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_bootseq_16x9.mp4"
-PSO_BOOTSEQ_4X3  RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_bootseq_4x3.mp4"
-PSO_INTROS_16X9  RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_intros_16x9.mp4"
-PSO_INTROS_4X3   RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_intros_4x3.mp4"
+PSO_BOOTSEQ_16X9 RCDATA "video\\pso_bootseq_16x9.mp4"
+PSO_BOOTSEQ_4X3  RCDATA "video\\pso_bootseq_4x3.mp4"
+PSO_INTROS_16X9  RCDATA "video\\pso_intros_16x9.mp4"
+PSO_INTROS_4X3   RCDATA "video\\pso_intros_4x3.mp4"
