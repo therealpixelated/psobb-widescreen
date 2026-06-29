@@ -1,0 +1,34 @@
+; dgVoodoo.conf.template - REFERENCE ONLY (Chain B / dgVoodoo2).
+;
+; install_dgvoodoo.ps1 does NOT overwrite your dgVoodoo.conf with this file. It
+; only PATCHES two keys in your existing conf (idempotently, after backing it up):
+;
+;   Antialiasing      = off      ; wrapper MSAA breaks ReShade depth resolve.
+;                                 ; AA is provided by ReShade SMAA instead.
+;                                 ; (SSAA is also depth-safe if you want wrapper AA.)
+;   dgVoodooWatermark = false
+;
+; This template documents the FULL set of dgVoodoo settings that matter for the
+; ReShade depth path, in case you are authoring a conf from scratch. The author
+; warns against the D3D12 output API with apps that use a second rendering API
+; (ReShade is one), so pin D3D11.
+
+[General]
+OutputAPI                            = d3d11_fl11_0   ; NOT d3d12 (breaks with ReShade)
+Adapters                             = all
+FullScreenMode                       = false          ; windowed; ReShade overlays cleanly
+
+[DirectX]
+VideoCard                            = internal3D
+VRAM                                 = 4096
+Filtering                            = 16             ; AF on (depth-safe)
+Resolution                           = unforced
+Antialiasing                         = off            ; <-- the depth-critical setting
+AppControlledScreenMode              = true
+dgVoodooWatermark                    = false
+FastVideoMemoryAccess                = false
+
+[DirectXExt]
+DepthBuffersBitDepth                 = appdriven
+SmoothedDepthSampling                = true
+RTTexturesForceScaleAndMSAA          = false          ; keep RT textures single-sampled for depth

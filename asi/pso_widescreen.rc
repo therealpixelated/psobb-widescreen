@@ -1,0 +1,13 @@
+// pso_widescreen.rc — embeds the compressed boot/intro clips INTO pso_widescreen.asi
+// so the videos ship inside the ASI: no loose .mp4 is distributed and the decoder
+// never falls back to a file (see mod_video.c vid_embedded_bytes / vid_mf_open_inner).
+// The boot-poster PNG stays a loose, swappable file (mod_boot_poster.c) by design.
+//
+// Resource names are the clip basenames (upper-cased); mod_video maps the configured
+// VideoPath/VideoBootPath basename to the matching resource. Paths are relative to
+// this .rc (the asi build dir) and point at the deployed compressed clips.
+
+PSO_BOOTSEQ_16X9 RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_bootseq_16x9.mp4"
+PSO_BOOTSEQ_4X3  RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_bootseq_4x3.mp4"
+PSO_INTROS_16X9  RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_intros_16x9.mp4"
+PSO_INTROS_4X3   RCDATA "..\\..\\..\\PSOBB.IO\\patches\\video\\pso_intros_4x3.mp4"

@@ -9,3 +9,12 @@
 Thumbs.db
 __pycache__/
 *.pyc
+# release staging + dev asi backups (never commit)
+_release/
+_deployed_*.asi
+*_bak/
+asi/_precleanup_bak/
+fastwarp-asi/
+# compiled RC output (keep the .rc source, ignore the built .res)
+*.res
+asi/psobb_boot_poster.png

@@ -18,8 +18,7 @@ own d3d8 wrapper; nothing on the client is touched on disk.
   minimap, menus and effects, not just the parts everyone notices.
 - **HudScale** — one knob for the entire UI.
 - **Quality-of-life customs** — minimap corner-pin, title rune-emblem scaling, photon-
-  streak position fix, char-select 3D model pan, over-head player name-label scaling, ESC
-  out of char-create, optional NoVignette.
+  streak position fix, char-select 3D model pan, optional NoVignette.
 - **Born-borderless virtual fullscreen** — no title bar, no IME / text-input breakage.
 - **Optional ReShade post-FX** — SMAA, SSAO, Cel, DOF, HDR, with one-click installers.
 
@@ -45,9 +44,11 @@ own d3d8 wrapper; nothing on the client is touched on disk.
 
 ## Install — Windows
 
-1. Grab the latest release `.zip`.
-2. Copy `pso_widescreen.asi` and `pso_widescreen.ini` into your client's `patches\`
-   folder (next to the other `.asi` files).
+1. Grab the latest release `.zip` (`-dgvoodoo`, `-crosire`, or `-asi-only` — see
+   "Recommended d3d8 wrapper" below).
+2. Extract it straight into your PSOBB client folder — the one with `psobb.exe` — and
+   let it merge: the mod lands in `patches\`, the wrapper sits next to `psobb.exe`, and
+   the ReShade pack drops alongside.
 3. Launch. Widescreen auto-enables from your display aspect; set your resolution in the
    launcher as usual.
 
@@ -89,13 +90,41 @@ Proton yet. (Untested by us — Deck / Wine reports welcome.)
 
 ## Config — `pso_widescreen.ini`
 
-| Key | Default | Meaning |
-|---|---|---|
-| `Enabled` | `1` | `1` = mod on, `0` = stock client |
-| `HUDScale` | `1.0` | UI scale (`1.0` = native 16:9) |
-| `NoVignette` | `1` | `1` removes the F12 / in-game-menu dim scrim |
+Widescreen auto-enables from your display aspect (4:3 stays stock), so most people never
+need to touch this. **HudScale is set in your launcher** — it writes `HUDScale` to
+`widescreen.cfg`, which the mod reads as the primary value (the ini's `HUDScale` is only a
+fallback for non-launcher setups).
 
-Everything else (layout, resolution auto-detect, the customs) is baked in and needs no
+The keys most people tune are below; the ini itself documents **every** key, with a fenced
+`ADVANCED` block for the auto-derived ones you shouldn't normally touch.
+
+| Key | Meaning |
+|---|---|
+| `VideoEnable` | `1` (default) plays the bundled boot + char-create clips; `0` = stock (no clips). |
+| `VideoTrigger` | `both` (default) = boot clip + char-create clip; or `boot` / `charcreate` for just one. |
+| `VideoSkippable` | `1` (default) = **Enter** / Esc skips a clip; `0` = it plays to the end. |
+| `MinimapSizeScale` | Minimap size, multiplied by HudScale. Lower it to shrink the minimap. |
+| `MinimapCornerRightPx` / `…TopPx` | Nudge the minimap into the top-right corner (negative = further right / up). |
+| `MinimapZoomEnable` / `MinimapZoom` | Map zoom; smaller `MinimapZoom` = zoomed out (see more around you). |
+| `NoVignette` | `1` (default) removes the dark dim scrim behind the F12 / in-game menu; `0` = stock. |
+| `IntegerScale` | `1` renders at a clean integer divisor of your screen then upscales sharply — helps high-DPI / 4K and the Wine-without-dgVoodoo FPS cliff. No-op at ≤1440p. Default `0`. |
+| `BootPosterEnabled` | `1` (default) shows the logo PNG over the first loading screen; `0` = off. |
+
+Auto-derived / advanced keys (`Enabled`, `Windowed`, `GameAspect`, `VideoDecoder`, the
+`Patch*` toggles, video paths, …) live in the ini's `ADVANCED` block — leave them unless
+you know what they do.
+
+### Make it yours — boot splash & clips
+
+These ship inside `patches\` and are meant to be swapped:
+
+- **Boot splash** — `patches\psobb_boot_poster.png`. Drop in any PNG to change the image
+  shown before the boot clip; delete it to skip straight to the clip.
+- **Clips** — `patches\video\pso_bootseq_16x9.mp4` / `_4x3.mp4` (boot) and
+  `pso_intros_16x9.mp4` / `_4x3.mp4` (char-create). Replace the matching aspect, or point
+  `VideoBootPath` / `VideoPath` at your own file. **Enter** skips a clip.
+
+Everything else (layout, resolution auto-detect, the QoL customs) is baked in and needs no
 tuning.
 
 ---

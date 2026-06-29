@@ -1,34 +1,18 @@
-// mod_video.h — P3 Stage 1 video player contract (FFmpeg-decoded pipe + Present blit).
+// mod_video.h — video player contract (FFmpeg / Media Foundation decode + Present blit).
 //
 // Self-contained companion module mirroring mod_boot_poster.c's contract.
 // All entry points are SAFE to call before init (no-op) and after disable
 // (no-op). The on_present path is a cheap `if(!g_video.enabled) return;`
 // when disabled, so VideoEnable=0 (default) is byte-identical to no module.
 //
-// Stage 1 scope: build the player + present path ONLY. No engine-state
-// hooks, no intro suppression (Stage 2). The Stage-1 test trigger plays a
-// configured video once on the first N present frames after device create.
-//
-// Stage 2 (2026-06-11): the Stage-1 boot-test trigger is replaced by a
-// VideoTrigger mode. The video is now driven by a per-frame STATE POLL — the
-// SPEC's "cover, don't detour" path (no engine-state-machine MinHook):
-//   * VID_TRIGGER_BOOT       — start once at boot/title (the old present-count
-//                              one-shot, now mode-gated).
-//   * VID_TRIGGER_CHARCREATE — start on the RISING edge of the char-create
-//                              scene gate: the engine current-scene id
-//                              @0x00AAB384 ∈ {3 (scripted intro), 5 (class-
-//                              select)} (RE 2026-06-11; replaces the old
-//                              0x00A3A93C-nonzero predicate, which falsely fired
-//                              on an existing-char Confirm because 0x00A3A93C is
-//                              the game-list socket buffer, not a char-create
-//                              root). The Present overlay COVERS the engine's scripted
-//                              starfield intro for the clip's duration; on
-//                              skip/EOF teardown reveals whatever the engine is
-//                              showing underneath (class-select once the script
-//                              has finished, else the tail of the scripted
-//                              intro). The engine state machine is NOT touched.
-//                              Re-armed on the gate's falling edge so re-entering
-//                              char-create replays.
+// VideoTrigger modes (the event that auto-starts playback):
+//   * VID_TRIGGER_BOOT       — start once at boot/title (a present-count one-shot).
+//   * VID_TRIGGER_CHARCREATE — driven by the char-create source-event hook (see
+//                              mod_video.c): request(3) arms the cover, request(5)
+//                              tears it down. The Present overlay covers the
+//                              engine's scripted starfield intro for the clip's
+//                              duration; on skip/EOF teardown reveals class-select.
+//                              Re-arms on the falling edge so re-entering replays.
 //   * VID_TRIGGER_OFF        — never auto-start (the default when no key set).
 
 #ifndef MOD_VIDEO_H
@@ -38,12 +22,12 @@
 #define VID_TRIGGER_OFF         0
 #define VID_TRIGGER_BOOT        1
 #define VID_TRIGGER_CHARCREATE  2
-// VID_TRIGGER_BOTH (2026-06-28): ONE mod_video instance plays the BOOT video at
-// boot (present-count one-shot, BOOT path) AND the CHAR-CREATE video at char-
-// create (request(3) source-event ownership, CHAR path). The BOOT leg NEVER arms
-// the char-create ownership writes (0xAAE980/0xAAE988); after the boot leg ends
-// (EOF/skip) the player fully resets and the active path switches boot->char so a
-// later request(3) is a clean fresh playback. Both legs stay Enter/Esc skippable.
+// VID_TRIGGER_BOTH: ONE mod_video instance plays the BOOT video at boot (present-
+// count one-shot, BOOT path) AND the CHAR-CREATE video at char-create (request(3)
+// source-event ownership, CHAR path). The BOOT leg NEVER arms the char-create
+// ownership writes (0xAAE980/0xAAE988); after the boot leg ends (EOF/skip) the
+// player fully resets and the active path switches boot->char so a later request(3)
+// is a clean fresh playback. Both legs stay Enter/Esc skippable.
 #define VID_TRIGGER_BOTH        3
 
 // VideoDecoder modes (parsed from the INI string in pso_widescreen.c).
@@ -72,9 +56,9 @@
 //   max_seconds    VideoMaxSeconds    (hard watchdog per playback)
 //   skip_debounce  VideoSkipDebounceMs(release-then-press arm delay)
 //   audio          VideoAudio         (1 = play sibling .wav via mci)
-//   diag           VideoDiag          (ACCEPTED but INERT as of 2026-06-17: the
-//                                       VideoDiag RED-quad isolation render path was
-//                                       pruned; the param is kept for ABI stability)
+//   diag           VideoDiag          (ACCEPTED but INERT: the VideoDiag RED-quad
+//                                       isolation render path was pruned; the param
+//                                       is kept for ABI stability)
 //   trigger        VideoTrigger       (VID_TRIGGER_OFF/BOOT/CHARCREATE/BOTH —
 //                                       what event(s) start playback; OFF = never)
 //   decoder        VideoDecoder       (VID_DECODER_MF [default, in-process MF]

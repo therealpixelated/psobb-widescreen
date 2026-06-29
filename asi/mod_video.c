@@ -1,77 +1,66 @@
-// mod_video.c — P3 Stage 1: FFmpeg-decoded video player + Present blit.
+// mod_video.c — skippable video player + Present blit (Media Foundation or FFmpeg).
 //
-// Architecture (per _p3_video_spec_2026-06-10.md §3-§5):
-//   - Spawn ffmpeg.exe as a child with its stdout piped to us, decoding
-//     the source to rawvideo BGRA at the backbuffer size:
-//       ffmpeg -loglevel error -i "<path>" -f rawvideo -pix_fmt bgra
-//              -s <bbW>x<bbH> -
-//     BGRA byte order == D3DFMT_A8R8G8B8 little-endian exactly (B,G,R,A),
-//     so there is ZERO CPU swizzle (boot_poster swizzles stb's RGBA; we
-//     don't).  The child runs in a Job object with KILL_ON_JOB_CLOSE so it
-//     dies with us no matter how we exit.
-//   - A reader thread does blocking ReadFile of exactly w*h*4 per frame
-//     into a 3-slot ring buffer and publishes the newest frame index with
-//     InterlockedExchange. The render thread (Present) never blocks on the
-//     pipe.
-//   - mod_video_on_present(): if playing, pick the latest DUE frame by
-//     wall-clock (QPC vs video fps), upload to a D3D8 texture, and blit it
-//     fullscreen letterboxed via the SAME quad path boot_poster uses
-//     (device vtable slot 72 DrawPrimitiveUP, RHW FVF). An opaque black
-//     fullscreen underlay provides letterbox bars.
-//   - Skip: GetAsyncKeyState(VK_RETURN/VK_ESCAPE) with release-then-press
-//     debounce; on skip stop playback + kill ffmpeg.
+// Decode architecture:
+//   - FFmpeg path: spawn ffmpeg.exe as a child with its stdout piped to us,
+//     decoding the source to rawvideo BGRA at the backbuffer size:
+//       ffmpeg -loglevel error -i "<path>" -f rawvideo -pix_fmt bgra -s <bbW>x<bbH> -
+//     BGRA byte order == D3DFMT_A8R8G8B8 little-endian exactly (B,G,R,A), so there
+//     is ZERO CPU swizzle. The child runs in a Job object with KILL_ON_JOB_CLOSE so
+//     it dies with us no matter how we exit. A reader thread does blocking ReadFile
+//     of exactly w*h*4 per frame into a 3-slot ring buffer and publishes the newest
+//     frame index with InterlockedExchange; the render thread never blocks on the pipe.
+//   - mod_video_on_present(): if playing, pick the latest DUE frame by wall-clock
+//     (QPC vs video fps), upload to a D3D8 texture, and blit it fullscreen
+//     letterboxed via the same quad path boot_poster uses (device vtable slot 72
+//     DrawPrimitiveUP, RHW FVF). An opaque black fullscreen underlay provides bars.
+//   - Skip: GetAsyncKeyState(VK_RETURN/VK_ESCAPE) with release-then-press debounce;
+//     on skip stop playback + kill the decoder.
 //
-// Stage 2 (2026-06-11) — REAL triggers. The Stage-1 boot-test "8th present"
-// auto-start is replaced by a VideoTrigger mode:
-//   * VID_TRIGGER_BOOT       — one-shot start after device warm-up (the former
-//                              Stage-1 behavior, now mode-gated). Covers the
-//                              boot splash; ends/skips to the title. STILL a
-//                              per-frame present-count one-shot (no engine hook).
-//   * VID_TRIGGER_CHARCREATE — driven by a SOURCE-EVENT hook, NOT a scene poll
-//                              (_cc_scene_entry_exit_hooks.md OWNERSHIP MODEL
-//                              2026-06-11). We MinHook the engine transition-
-//                              request setter sub_007A60DC @0x007A60DC and read
-//                              ONLY its `target` arg: request(3) (the unique
-//                              scripted-intro start) arms the cover (cc_session);
-//                              request(5|0|2|0xB) while cc_session is set TEARS
-//                              the cover down (the cover spans scene-3 ONLY).
-//                              ZERO reads of the current-scene global 0x00AAB384 /
-//                              the 0x00A3A93C buffer / the player array. Phase 4
-//                              (OWNERSHIP FINAL): we additionally take OWNERSHIP of
-//                              the scene-3 per-frame update 0x007C1588 via a SECOND
-//                              MinHook (stub_7c1588). While cc_session is set the
-//                              hook runs a replica that KEEPS the shared device
-//                              snapshot (0x007BECD4), the input AGGREGATION + skip
-//                              READ (0x007BFBA0 / 0x007BFEDC->0x007A6174), the 3D-audio
-//                              listener (0x00814168), and the shared frame epilogue
+// VideoTrigger modes:
+//   * VID_TRIGGER_BOOT       — one-shot start after device warm-up (a per-frame
+//                              present-count one-shot, no engine hook). Covers the
+//                              boot splash; ends/skips to the title.
+//   * VID_TRIGGER_CHARCREATE — driven by a SOURCE-EVENT hook, NOT a scene poll. We
+//                              MinHook the engine transition-request setter
+//                              sub_007A60DC @0x007A60DC and read ONLY its `target`
+//                              arg: request(3) (the unique scripted-intro start) arms
+//                              the cover (cc_session); request(5|0|2|0xB) while
+//                              cc_session is set tears the cover down (the cover spans
+//                              scene-3 ONLY). No reads of the current-scene global
+//                              0x00AAB384 / the 0x00A3A93C buffer / the player array.
+//                              We also take OWNERSHIP of the scene-3 per-frame update
+//                              0x007C1588 via a SECOND MinHook (stub_7c1588). While
+//                              cc_session is set the hook runs a replica that KEEPS
+//                              the shared device snapshot (0x007BECD4), the input
+//                              AGGREGATION + skip READ (0x007BFBA0 /
+//                              0x007BFEDC->0x007A6174), the 3D-audio listener
+//                              (0x00814168), and the shared frame epilogue
 //                              (0x0080030C), and SKIPS only the 3 intro DRAW calls
 //                              (0x0081745C/0x00817604/0x00818F80) + the intro state
 //                              machine (0x005BA748) -> the intro draws NOTHING under
 //                              our overlay but a deliberate skip / ESC still works
-//                              (the engine's own skip read drives it). The substate
-//                              tail still fires the engine's own request(5) for a clean
-//                              3->5 handoff. Engine audio is silenced via
-//                              Option K (save+zero the four SOUNDCTRL module-enable
-//                              dwords 0x00A46C88/8C/90/94; restore the SAVED values on
-//                              exit). Because under full ownership the intro ADX never
-//                              plays, the engine's natural ADX-done exit never fires,
-//                              so on video EOF/skip WE arm the engine's own 3->5 exit
-//                              (byte 0xAAE988=1, 0xAAE980=1); the owned replica then
-//                              issues the engine's OWN request(5) -> cc_on_request(5)
-//                              tears down the cover -> live class-select. Proven
-//                              create-NEW-only: scene 3 has a single confirm-gated
-//                              requester; pick-EXISTING goes straight to 0xB and never
-//                              hits 3/5, so the cover never arms for it.
+//                              (the engine's own skip read drives it). Engine audio is
+//                              silenced via Option K (save+zero the four SOUNDCTRL
+//                              module-enable dwords 0x00A46C88/8C/90/94; restore the
+//                              SAVED values on exit). Because under full ownership the
+//                              intro ADX never plays, the engine's natural ADX-done
+//                              exit never fires, so on video EOF/skip WE arm the
+//                              engine's own 3->5 exit (byte 0xAAE988=1, 0xAAE980=1);
+//                              the owned replica then issues the engine's OWN
+//                              request(5) -> cc_on_request(5) tears down the cover ->
+//                              live class-select. Create-NEW-only: scene 3 has a
+//                              single confirm-gated requester; pick-EXISTING goes
+//                              straight to 0xB and never hits 3/5, so the cover never
+//                              arms for it.
 //   * VID_TRIGGER_OFF        — never auto-start.
 //
-// OWNERSHIP vs COVER (Phase 4): this is OWNERSHIP-not-just-cover. The scene-3
-// update is replaced by our replica while cc_session is set, so the intro renders
-// nothing of its own (no starfield/crawl behind the video). It does NOT steal
-// input: the replica keeps the engine's input aggregation + skip read so a
-// deliberate skip and ESC behave exactly as stock. WE own the duration (the ADX is
-// muted under ownership); the video plays for its full length and the engine's own
-// request(5) fires at our EOF/SKIP. With VideoTrigger!=charcreate (or cc_session==0)
-// the 0x007C1588 stub is byte-identical passthrough — no behavior change.
+// OWNERSHIP vs COVER: the scene-3 update is replaced by our replica while cc_session
+// is set, so the intro renders nothing of its own (no starfield/crawl behind the
+// video). It does NOT steal input: the replica keeps the engine's input aggregation +
+// skip read so a deliberate skip and ESC behave exactly as stock. WE own the duration
+// (the ADX is muted under ownership); the video plays for its full length and the
+// engine's own request(5) fires at our EOF/SKIP. With VideoTrigger!=charcreate (or
+// cc_session==0) the 0x007C1588 stub is byte-identical passthrough — no behavior change.
 //
 // HARD CONSTRAINT: VideoEnable=0 (default) => mod_video_init early-returns
 // and every on_present is `if(!g_video.enabled) return;`. The build is then
@@ -683,7 +672,7 @@ static int vid_file_exists(const char *path)
 // NEVER read the current-scene global 0x00AAB384, the (mis-named) 0x00A3A93C
 // game-list buffer, or the player array for the CHARCREATE trigger.
 //
-// ENTRY/EXIT logic (the doc's OWNERSHIP MODEL 2026-06-11: cover scene-3 ONLY):
+// ENTRY/EXIT logic (OWNERSHIP MODEL: cover scene-3 ONLY):
 //   target == 3                          -> cc_session=1; start the cover.
 //                                           (0x004143E5 is the ONLY request(3)
 //                                            site in the image — the confirm-
@@ -700,7 +689,7 @@ static int vid_file_exists(const char *path)
 //                                           (created -> 0xB, cancel -> 2/0).
 //   otherwise                            -> ignored.
 //
-// LIVE-RE CONFIRMED 2026-06-11 (harness disasm on the attached io client):
+// LIVE-RE CONFIRMED (harness disasm on the attached io client):
 //   0x007A60DC: 8B 44 24 04  mov eax,[esp+4]   (arg0 at [esp+4], __cdecl)
 //               C7 05 94 B3 AA 00 01 00 00 00  mov [0xAAB394],1 (MinHook-relocatable)
 //   0x004143E5: 6A 03        push 3
@@ -770,7 +759,7 @@ static void __cdecl cc_on_request(int target)
         InterlockedExchange(&g_video.cc_session, 1);    // the replica now owns scene-3
         // (No audio mute on char-create: the intro ADX is prevented at its SOURCE by
         //  the play_bgm 0x00814AFC cc_session gate — no SOUNDCTRL zeroing, so engine
-        //  audio is untouched and there is no "BGM gone after skip". 2026-06-28.)
+        //  audio is untouched and there is no "BGM gone after skip".)
         g_video.start_requested = 1;                    // Present body kicks vid_start
     } else if (InterlockedCompareExchange(&g_video.cc_session, 0, 0)) {
         if (target == 5 || target == 0 || target == 2 || target == 0xB) {
@@ -859,19 +848,18 @@ static volatile LONG *g_cc_session_p = &g_video.cc_session;
 
 // ---- ENGINE-AUDIO suppression: Option K — the SOUNDCTRL module-enable flags ----
 //
-// _cc_engine_audio_suppress.md REVISION 2 + PHASE 2 LIVE PROOF 2026-06-12: the
-// char-create intro BGM (CUBE_OPENING.adx) is a software-decoded ADX STREAM, NOT a
-// by-id 0x00ACB388 secondary buffer — so it does NOT pass through the play-by-id
+// The char-create intro BGM (CUBE_OPENING.adx) is a software-decoded ADX STREAM, NOT
+// a by-id 0x00ACB388 secondary buffer — so it does NOT pass through the play-by-id
 // core 0x00828E4C and is NOT in the table STOP-ALL 0x00829AD0 walks. THREE prior
 // levers (the 0x004D80A4 3D-pump, the 0x00828E4C by-id gate, STOP-ALL alone) each
 // hit a wrong subsystem. The ONE choke that ALL THREE audio subsystems honor is the
 // engine's own "SOUNDCTRL" module-enable flags 0x00A46C88/8C/90/94 (getter
 // 0x00483740 = [0x00A46C8C]; checked at the TOP of every service/play/feed path).
 //
-// PHASE 2 LIVE PROOF (PID 108380, 2026-06-12) CONFIRMED conditions (iii)+(iv):
-// writing 0 to all four dwords silenced the engine BGM immediately (no ring-out
-// observed; engine did NOT auto-restore), and restoring resumed audio. So the lever
-// is: SAVE the four dwords + WRITE 0 at ARM; RESTORE the SAVED values at DISARM.
+// Live-proven: writing 0 to all four dwords silences the engine BGM immediately
+// (no ring-out; the engine does NOT auto-restore), and restoring resumes audio. So
+// the lever is: SAVE the four dwords + WRITE 0 at ARM; RESTORE the SAVED values at
+// DISARM.
 //
 //   * RESTORE the SAVED values, NOT a hardcoded 1, and NOT the setter 0x00483760
 //     (which FORCES all four to 1) — a user who disabled sound in-game must stay
@@ -883,15 +871,13 @@ static volatile LONG *g_cc_session_p = &g_video.cc_session;
 //     DirectSound mixer; XAudio2 (g_video.xa / xa_voice / xa_master, a separate
 //     engine + WASAPI endpoint) never reads them.
 //
-// TODO (open per the task / Rev-2 §3 step-2): if the orchestrator's debugger-walk
-// finds a residual ring-out of the in-flight ADX stream past one decode block (the
-// ~85% HYPOTHESIS that the stream feed 0x0070EF28/0x00839838 also gates on
-// SOUNDCTRL), add the proven explicit stream tear at ARM (decoder dtor 0x00829DE0
-// with the live stream handle from [*0x00A9CD54+0x24], SEH-guarded). Under FULL
-// scene-3 ownership (the 0x007C1588 replica) the ADX-start blocks are never entered,
-// so the stream should never start — SOUNDCTRL=0 then covers only any pre-hook frame
-// — and the tear is likely unnecessary. We leave the TODO and rely on SOUNDCTRL=0,
-// which PHASE 2 PROVED silences engine audio with no observed ring-out.
+// TODO: if a residual ring-out of the in-flight ADX stream past one decode block is
+// observed (i.e. the stream feed 0x0070EF28/0x00839838 also gates on SOUNDCTRL), add
+// an explicit stream tear at ARM (decoder dtor 0x00829DE0 with the live stream handle
+// from [*0x00A9CD54+0x24], SEH-guarded). Under FULL scene-3 ownership (the 0x007C1588
+// replica) the ADX-start blocks are never entered, so the stream should never start
+// and the tear is likely unnecessary; SOUNDCTRL=0 silences engine audio with no
+// observed ring-out.
 #define CC_SOUNDCTRL_VA   0x00A46C88u   // first of four contiguous "SOUNDCTRL" dwords
 
 static volatile DWORD *const g_soundctrl = (volatile DWORD *)(uintptr_t)CC_SOUNDCTRL_VA;
@@ -900,7 +886,7 @@ static volatile LONG g_soundctrl_armed = 0;  // 1 while the four flags are force
 
 // ---- ENGINE-BGM / streamed-ADX suppression: StopAllAudio_00815434 ------------
 //
-// AUDIO-LEAK FIX (2026-06-24, disasm-verified). The SOUNDCTRL flags above gate
+// AUDIO-LEAK FIX (disasm-verified). The SOUNDCTRL flags above gate
 // ONLY the by-id DirectSound SE/BGM mixer (getter 0x00483740 = [0x00A46C8C],
 // checked at the top of the play-by-id core 0x00828E4C + STOP-ALL 0x00829AD0).
 // They DO NOT gate the char-create intro BGM: CUBE_OPENING.adx is started in the
@@ -993,9 +979,9 @@ static void cc_audio_disarm(void)
 }
 
 // ---- INTRO-BGM PREVENTION: the "no mute" replacement for char-create ----------
-// Owner directive 2026-06-28: "you shouldn't NEED to mute anything if you insert the
-// video as a proper frame." So instead of zeroing SOUNDCTRL / per-frame StopAllAudio
-// to silence the intro ADX UNDER the video, PREVENT it from starting at its source.
+// Rather than zeroing SOUNDCTRL / per-frame StopAllAudio to silence the intro ADX
+// UNDER the video, PREVENT it from starting at its source (inserting the video as a
+// proper frame should not require muting anything).
 // The intro CUBE_OPENING.adx is started by play_bgm (void __cdecl, byte* filename) at
 // 0x00814AFC (chain: scene-3 entry ctor 0x007C1714 -> 0x007C16D4 -> 0x0070F41C ->
 // 0x0070F50C -> call 0x00814AFC), which runs AFTER request(3) sets cc_session. We
@@ -1050,8 +1036,8 @@ static void cc_play_bgm_hook_uninstall(void)
 }
 
 // ---- BOOT TITLE-DEFER: the boot leg's "video as a proper frame" --------------
-// Owner directive 2026-06-28: the boot video must play FIRST, THEN the title fades
-// in. Today the title (scene 1) builds UNDER the video overlay: its objects are made
+// The boot video must play FIRST, THEN the title fades in. Without this the title
+// (scene 1) builds UNDER the video overlay: its objects are made
 // in .init 0x007A45D0 and its .update 0x007A4418 fires a one-shot fade-in + BGM on
 // the first call after the build — all consumed invisibly under the cover, so EOF
 // hardcuts to an already-built, muted title.
@@ -1070,9 +1056,11 @@ static void cc_play_bgm_hook_uninstall(void)
 // sibling .update matches SinowberillScene_Update_007a4418 in the decompile).
 #define BOOT_TITLE_INIT_VA    0x007A45D0u   // scene_handlers[1].init
 #define BOOT_TITLE_UPDATE_VA  0x007A4418u   // scene_handlers[1].update
+#define BOOT_PAD_AGG_VA       0x007BFBA0u   // front-end pad aggregation (input pump + action masks)
 
 static LPVOID g_tramp_title_init   = NULL;
 static LPVOID g_tramp_title_update = NULL;
+static LPVOID g_tramp_pad_agg      = NULL;
 static int    g_boot_title_hook_installed = 0;
 static volatile LONG g_boot_title_deferred = 0;
 
@@ -1102,6 +1090,29 @@ static void __cdecl boot_title_update_detour(void)
     if (g_tramp_title_update) ((void (__cdecl *)(void))g_tramp_title_update)();
 }
 
+// INPUT-LEAK FIX (the "skip-Enter counts for multiples" bug): the title scene's
+// .update (0x007A4418) KEEPS RUNNING under the boot cover — we only defer its .init.
+// That update pumps the shared front-end input object via 0x007BFBA0 -> 0x0078EEDC
+// and builds the CONFIRM/CANCEL action masks (0xAAE934/938) the title reads to advance
+// the scene. So a single skip-Enter held under the cover advances the title once PER
+// FRAME the update runs -> "counts for multiples". While a boot cover is up (boot leg
+// only: cc_session==0), DROP the aggregation entirely so the title sees NO input and
+// cannot advance. The mod's own skip read is GetAsyncKeyState (separate from the
+// 0x00A9CAA0 queue), so skip detection is unaffected; once the cover tears down — which
+// the skip-drain delays until the held key releases — the title reads input normally.
+// 0x007BFBA0 is int __cdecl(void): `sub esp,0xC` ... bare `ret`, no stack args
+// (disasm-verified), so a plain C detour is ABI-clean. During char-create the scene-3
+// owned-frame omits this call, so the hook only ever fires on the boot/front-end path.
+static int __cdecl detour_pad_agg(void)
+{
+    if (InterlockedCompareExchange(&g_video.playing, 0, 0) &&
+        !InterlockedCompareExchange(&g_video.cc_session, 0, 0)) {
+        return 0;   // boot cover up -> swallow the front-end input this frame
+    }
+    if (g_tramp_pad_agg) return ((int (__cdecl *)(void))g_tramp_pad_agg)();
+    return 0;
+}
+
 static int boot_title_hook_install(void)
 {
     if (g_boot_title_hook_installed) return 1;
@@ -1118,9 +1129,22 @@ static int boot_title_hook_install(void)
                       (LPVOID)boot_title_update_detour, &g_tramp_title_update) != MH_OK) {
         log_line("[video] boot-title .update hook create failed"); return 0;
     }
+    // INPUT-LEAK FIX: hook the front-end pad aggregation too, so detour_pad_agg can
+    // swallow title input while the boot cover is up. Non-fatal — a failure leaves the
+    // cover working, the title just keeps leaking the skip-Enter (old behavior).
+    if (MH_CreateHook((LPVOID)(uintptr_t)BOOT_PAD_AGG_VA,
+                      (LPVOID)detour_pad_agg, &g_tramp_pad_agg) != MH_OK) {
+        log_line("[video] boot pad-agg hook create failed -> title input may leak");
+        g_tramp_pad_agg = NULL;
+    }
     if (MH_EnableHook((LPVOID)(uintptr_t)BOOT_TITLE_INIT_VA) != MH_OK ||
         MH_EnableHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA) != MH_OK) {
         log_line("[video] boot-title MH_EnableHook failed"); return 0;
+    }
+    if (g_tramp_pad_agg &&
+        MH_EnableHook((LPVOID)(uintptr_t)BOOT_PAD_AGG_VA) != MH_OK) {
+        log_line("[video] boot pad-agg MH_EnableHook failed -> title input may leak");
+        g_tramp_pad_agg = NULL;
     }
     g_boot_title_hook_installed = 1;
     log_line("[video] boot title-defer hooks installed (.init=0x%08x .update=0x%08x)",
@@ -1135,9 +1159,14 @@ static void boot_title_hook_uninstall(void)
     MH_DisableHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA);
     MH_RemoveHook((LPVOID)(uintptr_t)BOOT_TITLE_INIT_VA);
     MH_RemoveHook((LPVOID)(uintptr_t)BOOT_TITLE_UPDATE_VA);
+    if (g_tramp_pad_agg) {
+        MH_DisableHook((LPVOID)(uintptr_t)BOOT_PAD_AGG_VA);
+        MH_RemoveHook((LPVOID)(uintptr_t)BOOT_PAD_AGG_VA);
+    }
     g_boot_title_hook_installed = 0;
     g_tramp_title_init = NULL;
     g_tramp_title_update = NULL;
+    g_tramp_pad_agg = NULL;
 }
 
 // ---- OWNERSHIP replica: MinHook the scene-3 update 0x007C1588 ----
@@ -1148,9 +1177,9 @@ static void boot_title_hook_uninstall(void)
 // is the only thing on screen, no menu is actuated behind the cover, and a
 // deliberate skip / ESC still works exactly as stock.
 //
-// LIVE DISASM RE-DERIVATION (2026-06-17, harness disasm on the io client, base
-// 0x00400000 — every VA below CONFIRMED, superseding the earlier doc which named
-// inlined-decompile addresses for the draws and wrongly skipped the input reads):
+// Disasm-derived (harness disasm on the io client, base 0x00400000 — every VA below
+// confirmed). The replica must KEEP the input reads: skipping the pad aggregation
+// (0x007BFBA0) or the skip read (0x007BFEDC) means the engine skip can never fire.
 //
 //   0x7C1588  call 0x007BECD4    [DEV]   KEEP  shared input-DEVICE snapshot.
 //   0x7C158D  call 0x007BFBA0    [INPUT] KEEP  pad/keyboard AGGREGATION. Runs the
@@ -1233,10 +1262,10 @@ static void boot_title_hook_uninstall(void)
 // the kept draws are skipped so the `mov ecx,0xACA2E4` ECX setup is irrelevant.
 #define CC_SCENE3_UPDATE_VA   0x007C1588u
 #define CC_S3_DEV_SNAPSHOT    0x007BECD4u   // [DEV]   KEEP — shared input-device snapshot (input-inert)
-#define CC_S3_PAD_AGG         0x007BFBA0u   // [INPUT] DROPPED 2026-06-24 — pumps shared input obj 0x00A9CAA0 -> the leak
+#define CC_S3_PAD_AGG         0x007BFBA0u   // [INPUT] DROPPED — pumps shared input obj 0x00A9CAA0 -> the leak
 #define CC_S3_AUDIO_LISTENER  0x00814168u   // [AUDIO] KEEP — 3D-audio listener position
-#define CC_S3_SKIP_READ       0x007BFEDCu   // [INPUT] DROPPED 2026-06-24 — redundant w/ the mod's GetAsyncKeyState skip
-#define CC_S3_SKIP_APPLY      0x007A6174u   // [INPUT] DROPPED 2026-06-24 — engine skip apply, no longer driven
+#define CC_S3_SKIP_READ       0x007BFEDCu   // [INPUT] DROPPED — redundant w/ the mod's GetAsyncKeyState skip
+#define CC_S3_SKIP_APPLY      0x007A6174u   // [INPUT] DROPPED — engine skip apply, no longer driven
 #define CC_S3_EPILOGUE        0x0080030Cu   // [EPILOGUE] KEEP — shared frame epilogue (scene pump)
 #define CC_REQUEST_SETTER_CALL 0x007A60DCu  // engine request(target) — the SM tail uses it
 
@@ -1258,7 +1287,7 @@ static void cc_scene3_owned_frame(void)
     cc_void_fn_t    epilogue      = (cc_void_fn_t)(uintptr_t)CC_S3_EPILOGUE;
     cc_request_fn_t request       = (cc_request_fn_t)(uintptr_t)CC_REQUEST_SETTER_CALL;
 
-    // INPUT-LEAK FIX (2026-06-28): DRAIN the front-end keyboard queue every owned
+    // INPUT-LEAK FIX: DRAIN the front-end keyboard queue every owned
     // frame. The skip-Enter is BUFFERED in this queue (0x00A9CAA0) and survives the
     // cover -> class-select reads it right after the 3->5 handoff and auto-picks
     // Hunter. Waiting for key-release didn't help because the EVENT is buffered, not
@@ -2581,11 +2610,6 @@ static int vid_skip_keys_up(void)
     SHORT esc = GetAsyncKeyState(VK_ESCAPE);
     return ((ret & 0x8000) == 0) && ((esc & 0x8000) == 0);
 }
-
-// ESC -> back-to-char-select poll lives in pso_widescreen.c (cc_esc_back_tick),
-// driven from the always-on Hook_Present so it runs regardless of VideoEnable.
-// It is gated solely on the engine's current-scene global [0x00AAB384]==5,
-// independent of mod_video's cc_session window.
 
 // ---- texture upload of one frame slot ----
 

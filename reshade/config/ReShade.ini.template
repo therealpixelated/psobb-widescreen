@@ -1,0 +1,33 @@
+; ReShade.ini - authored by the PSOBB ReShade installer.
+; {{PRESET}} is replaced with the generated preset path at install time.
+;
+; Depth-buffer keys live in [DEPTH] (Generic Depth addon). PSOBB clears its
+; depth buffer per frame, so DepthCopyBeforeClears=1 is almost always required
+; for SSAO/DOF to see geometry.
+
+[GENERAL]
+EffectSearchPaths=.\reshade-shaders\Shaders\**
+TextureSearchPaths=.\reshade-shaders\Textures\**
+PresetPath={{PRESET}}
+PerformanceMode=1
+SkipLoadingDisabledEffects=1
+
+[INPUT]
+KeyOverlay=36,0,0,0
+KeyNextPreset=0,0,0,0
+KeyPreviousPreset=0,0,0,0
+
+[OVERLAY]
+TutorialProgress=4
+ShowFPS=0
+ShowClock=0
+
+[DEPTH]
+DepthCopyBeforeClears=1
+DepthCopyAtClearIndex=0
+UseAspectRatioHeuristics=1
+RememberDepthBuffer=1
+
+[SCREENSHOT]
+SavePath=.\reshade-shaders\Screenshots
+FileFormat=1

@@ -1,0 +1,5 @@
+# Downloaded artifacts (ReShade setup, extracted DLL) — never committed.
+.cache/
+# qUINT MXAO is non-redistributable; if a copy ever lands here, ignore it.
+**/qUINT_*.fx
+**/qUINT_*.fxh

@@ -10,9 +10,17 @@ cd /d "%~dp0"
 
 del pso_widescreen.obj pso_widescreen.exp pso_widescreen.lib pso_widescreen.asi pso_widescreen.res p_*.obj 2>nul
 
-REM ----- embed the compressed boot/intro clips as RCDATA (no loose .mp4 shipped) -----
+REM ----- embed the boot/intro clips as RCDATA, IF present. The .mp4s live in
+REM PSOBB.IO\patches\video and are NOT in the repo. A clean source checkout
+REM without them builds WITHOUT embedded video (the decoder no-ops on a missing
+REM resource) instead of failing the build.
 rc /nologo /fo pso_widescreen.res pso_widescreen.rc
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+  echo [build] clips not embeddable - building WITHOUT embedded video
+  set "RCRES="
+) else (
+  set "RCRES=pso_widescreen.res"
+)
 
 REM ----- MinHook (for Phase-3 sprite-primitive inline hook 2026-05-10) -----
 set MH=..\_shared\minhook
@@ -23,7 +31,7 @@ cl /nologo /c /O2 /W3 /GS- /Fop_hde.obj  /I %MH%\include  %MH%\src\hde\hde32.c
 
 cl /nologo /LD /O2 /W3 /GS- /I %MH%\include ^
    pso_widescreen.c asset_registry.c asset_registry_generated.c mod_boot_poster.c mod_video.c ^
-   pso_widescreen.res ^
+   %RCRES% ^
    p_buf.obj p_hook.obj p_trm.obj p_hde.obj ^
    kernel32.lib user32.lib gdi32.lib winmm.lib ^
    mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib ^

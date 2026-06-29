@@ -154,7 +154,7 @@ __declspec(dllexport) int pso_assets_set_value(int idx, float value) {
 
 // Group-name prefix exclusion list. Entries whose `group` field starts
 // with any of these strings are NOT scaled by apply_initial_scale.
-// Bisected 2026-05-09: the auto-generator picked up f256_selectgamen_b
+// The auto-generator picked up f256_selectgamen_b
 // (= login menu) and f256_carsol (= map cursor) which were never part
 // of the user's original char-create calibration; scaling their POS_Y
 // by 1.65 dropped the login menu to the bottom of the screen and made
@@ -166,7 +166,7 @@ static const char *const kScaleExcludeGroups[] = {
     // Login-screen ad / advertisement plates. These hold the engine's
     // own login menu Y anchors; scaling them by 1.65 drops the visible
     // login menu (Start Game / Exit Game / Patch Download / Register
-    // UserID) to the very bottom of the screen. Bisected 2026-05-09.
+    // UserID) to the very bottom of the screen.
     "auto.f256_ad",            // covers f256_ad, f256_ad_eng (prefix-match)
     "auto.f256_adpic",         // covers f256_adpic01, future suffixes
     "auto.f256_hyouji",        // login-display plates ("hyouji" = display)
