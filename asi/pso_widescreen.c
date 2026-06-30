@@ -242,6 +242,11 @@ static struct {
     // MinimapCornerRightPx / MinimapCornerTopPx.
     float minimap_corner_right_px; // default 0.0 (no extra right margin).
     float minimap_corner_top_px;   // default 0.0 (no extra top margin).
+    // CUSTOM C3 — compass (minimap direction icon) position from the BOTTOM-RIGHT screen
+    // corner, in design px. Bigger = further from the corner. INI: CompassRightPx /
+    // CompassBottomPx.
+    float compass_right_px;        // default 60.0 (in from the right edge).
+    float compass_bottom_px;       // default 70.0 (up from the bottom edge).
     // CUSTOM C3 — minimap ZOOM (ported from the standalone pso_minimap.asi). A single
     // float imm32 in the engine's .text at 0x00804A5D, pushed into the minimap
     // projection setup at 0x00804A65. SMALLER = zoomed OUT (wider minimap field of
@@ -441,6 +446,8 @@ static void load_config(void)
     g_cfg.minimap_size_scale   =  1.30f;  // C3: minimap size multiplier ON TOP of HudScale.
     g_cfg.minimap_corner_right_px = 0.0f; // C3: design-space right margin from the top-right corner.
     g_cfg.minimap_corner_top_px   = 0.0f; // C3: design-space top margin from the top-right corner.
+    g_cfg.compass_right_px        = 60.0f; // C3: compass in from the bottom-right corner (design px).
+    g_cfg.compass_bottom_px       = 70.0f; // C3: compass up from the bottom-right corner (design px).
     g_cfg.patch_minimap_zoom  = 1;        // C3: overwrite the .text minimap zoom divisor.
     g_cfg.minimap_zoom        = 0.60f;    // C3: zoomed-out default (stock 1.1338). Smaller = wider FOV.
     g_cfg.debug_log           = 0;
@@ -560,6 +567,8 @@ static void load_config(void)
         else if (_stricmp(key, "MinimapSizeScale")  == 0) g_cfg.minimap_size_scale = (float)atof(val);
         else if (_stricmp(key, "MinimapCornerRightPx") == 0) g_cfg.minimap_corner_right_px = (float)atof(val);
         else if (_stricmp(key, "MinimapCornerTopPx")   == 0) g_cfg.minimap_corner_top_px   = (float)atof(val);
+        else if (_stricmp(key, "CompassRightPx")       == 0) g_cfg.compass_right_px         = (float)atof(val);
+        else if (_stricmp(key, "CompassBottomPx")      == 0) g_cfg.compass_bottom_px        = (float)atof(val);
         else if (_stricmp(key, "MinimapZoomEnable") == 0) g_cfg.patch_minimap_zoom = atoi(val);
         else if (_stricmp(key, "MinimapZoom")       == 0) {
             float z = (float)atof(val);
@@ -3227,8 +3236,12 @@ static const bake_t kBakes[] = {
   { 0x009FF50C, K_ADD, B_A, 0.5f, -320.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.half", B_LIT },
   /* minimap viewport (idx0) X/Y are NOT deanchored here — apply_special() re-derives
      an ABSOLUTE corner anchor from native fractions every pass (size + position). */
-  { 0x00A11390, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
-  { 0x00A11398, K_ADD, B_A, 1.0f, -640.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.full", B_LIT },
+  /* type-0 compass/player icon off-X (0x00A11390 / 0x00A11398) are NOT deanchored
+     here either: the old "deanchor.full" rows only ever moved X (never Y), so the
+     icons could never TRACK a relocated box. apply_special() now owns all four
+     type-0 X/Y icon slots (0x00A11390/94/98/9C) as the SINGLE writer, deriving them
+     from the box origin so the compass/player stay glued to the map. Removing these
+     two K_ADD rows eliminates the apply_bakes-vs-apply_special write fight. */
   { 0x00A113A4, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
   { 0x00A113AC, K_ADD, B_C, 1.0f, -480.0f, SRC_ANZZ1, GATE_ALWAYS, 0x00000000, "deanchor.bottom", B_LIT },
   /* minimap background (idx0) X/Y are NOT deanchored here — see apply_special(). */
@@ -3795,6 +3808,30 @@ static void apply_special(const ws_scale_ctx *s)
         sp_write_f32(0x00A11404u, bgH);
         sp_write_f32(0x00A113E8u, bgX);
         sp_write_f32(0x00A113ECu, bgY);
+        /* COMPASS + PLAYER ICONS track the box. The engine draws each icon at
+           screen = base_short + offset_f32 in the SAME DESIGN space as the box (both
+           go through the 2D affine at RenderUIQuad 0x0082B440). We pin the icon's
+           design-space position to box_origin + frac*box_size (frac from the native
+           640x480 layout), then back out the offset_f32 the engine adds:
+               offset = target - base_short.
+           Stock layout: box (480,64,128,128); compass screen (591,175); player (591,176).
+             compass dx=dy = 111/128 of box size ; player dx = 111/128, dy = 112/128.
+           These fractions are size-invariant -> the icons sit at the same visual spot
+           on the map at any S, and at S=1,dw=640,dh=480,cr=ct=0 reproduce the stock
+           offsets exactly. Single writer (the two old deanchor.full rows were removed),
+           absolute re-derive each pass -> idempotent + flip-aware under sp_write_f32. */
+        float cmpX = bgX + (111.0f/128.0f)*bgW;   /* 591 @identity */
+        float cmpY = bgY + (111.0f/128.0f)*bgH;   /* 175 @identity */
+        float plrX = bgX + (111.0f/128.0f)*bgW;   /* 591 @identity */
+        float plrY = bgY + (112.0f/128.0f)*bgH;   /* 176 @identity */
+        sp_write_f32(0x00A11398u, cmpX - 16.0f);  /* compass off X -> 575 @identity (base 16) */
+        sp_write_f32(0x00A1139Cu, cmpY - 16.0f);  /* compass off Y -> 159 @identity (base 16) */
+        sp_write_f32(0x00A11390u, plrX - 16.0f);  /* player  off X -> 575 @identity (base 16) */
+        sp_write_f32(0x00A11394u, plrY - 27.0f);  /* player  off Y -> 149 @identity (base 27) */
+        /* NOTE: CompassRightPx/CompassBottomPx ini knobs are currently INERT — the
+           icons now follow the box's own corner anchor (MinimapCornerRightPx/TopPx),
+           so a separate compass nudge would only desync the icons from the map. Left
+           in the cfg (harmless defaults) in case a future per-icon offset is wanted. */
     }
 
     /* C3 (ours, ported from pso_minimap.asi): minimap ZOOM. A flat .text imm32 divisor
