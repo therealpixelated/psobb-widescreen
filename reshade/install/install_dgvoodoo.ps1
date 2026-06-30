@@ -108,16 +108,21 @@ if (-not $NoAAEdit) {
     $bak = "$confPath.reshade-bak"
     if (-not (Test-Path $bak)) { Copy-Item -LiteralPath $confPath -Destination $bak; Write-Info "backed up dgVoodoo.conf" }
     # MSAA breaks ReShade depth resolve. Force Antialiasing = off for both the
-    # [DirectX] and [Glide] sections. Keep AF (Filtering) untouched. Watermark off.
+    # [DirectX] and [Glide] sections. Watermark off.
     $new = [System.Text.RegularExpressions.Regex]::Replace(
         $conf, '(?m)^\s*Antialiasing\s*=.*$', 'Antialiasing                        = off')
     $new = [System.Text.RegularExpressions.Regex]::Replace(
         $new, '(?m)^\s*dgVoodooWatermark\s*=.*$', 'dgVoodooWatermark                   = false')
+    # Anisotropic filtering: force 16x. AF is a texture-SAMPLING setting (the wrapper's
+    # job, not a ReShade post-shader) and is depth-safe, so we always enable it. The
+    # ^\s*Filtering anchor only hits the [DirectX] Filtering key, not TMUFiltering.
+    $new = [System.Text.RegularExpressions.Regex]::Replace(
+        $new, '(?m)^\s*Filtering\s*=.*$', 'Filtering                           = 16')
     if ($new -ne $conf) {
         [System.IO.File]::WriteAllText($confPath, ($new -replace "`r?`n","`r`n"))
-        Write-Ok "dgVoodoo.conf: Antialiasing=off (depth-safe), Watermark=false"
+        Write-Ok "dgVoodoo.conf: Antialiasing=off (depth-safe), Filtering=16 (16x AF), Watermark=false"
     } else {
-        Write-Info "dgVoodoo.conf already AA-off / watermark-off"
+        Write-Info "dgVoodoo.conf already AA-off / AF-16x / watermark-off"
     }
     if ($cfg.MSAA -eq 1) {
         Write-Warn2 "widescreen.cfg MSAA=1, but wrapper MSAA must be OFF for ReShade depth (SSAO/DOF). AA is provided by SMAA instead."
